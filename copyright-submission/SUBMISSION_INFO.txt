@@ -1,0 +1,34 @@
+================================================================================
+                         COPYRIGHT SUBMISSION INFO
+================================================================================
+
+Project Name:
+    DKE Hybrid Messaging Engine
+
+Creation Date:
+    September 20, 2026 (2026-09-20)
+
+GitHub Repository URL:
+    https://github.com/pawangupta3401-art/dke-hybrid-messaging-engine.git
+
+Description:
+    Dynamic Key Evolution (DKE) Hybrid Messaging Engine is a peer-to-peer 
+    end-to-end encrypted messaging engine featuring per-message key ratcheting 
+    via dynamic hash chains, ephemeral X25519 ECDH key agreement, HKDF-SHA256, 
+    and AES-256-GCM AEAD message protection.
+
+Included Files & Directories:
+    - crypto_core.py
+    - dke_engine.py
+    - protocol.py
+    - main_chat.py
+    - demo_e2e.py
+    - tests/
+        - __init__.py
+        - test_dke.py
+    - README.md
+    - NOTICE.md
+    - requirements.txt
+    - SUBMISSION_INFO.txt
+
+================================================================================

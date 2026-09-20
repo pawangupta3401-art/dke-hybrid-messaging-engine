@@ -1,0 +1,21 @@
+# DKE Hybrid Messaging Engine — Python Dependencies
+# TAD Reference: Section 10 — Dependencies
+#
+# Always verify licenses before distribution:
+#   cryptography  -> Apache-2.0 / BSD (verify for the installed version)
+#   pytest        -> MIT
+#   click         -> BSD
+#
+# Pin versions for reproducibility; update after security review.
+
+# Cryptographic primitives: X25519, HKDF-SHA-256, AES-256-GCM
+# TAD Section 3.1 (crypto_core), Section 3.3 (protocol), Section 5.3
+cryptography>=41.0.0
+
+# Test runner
+# TAD Section 3.5 (test_dke), Section 9 (Technology Stack)
+pytest>=7.4.0
+
+# CLI argument parsing (alternative to stdlib argparse)
+# TAD Section 3.4 (main_chat), Section 9 (Technology Stack)
+click>=8.1.0
