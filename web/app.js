@@ -208,12 +208,69 @@
   const elInspAliceOut = document.getElementById('insp-alice-out');
   const elInspBobOut = document.getElementById('insp-bob-out');
   const elInspLastNonce = document.getElementById('insp-last-nonce');
+  const elBtnToggleWire = document.getElementById('btn-toggle-wire');
 
-  function appendChat(transcriptEl, text, className) {
+  let allWireExpanded = false;
+
+  function appendChat(transcriptEl, text, className, wireData = null) {
+    if (!wireData) {
+      const line = document.createElement('div');
+      line.className = 'chat-line ' + className;
+      line.textContent = text;
+      transcriptEl.appendChild(line);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      return;
+    }
+
+    const group = document.createElement('div');
+    group.className = 'chat-message-group';
+
     const line = document.createElement('div');
     line.className = 'chat-line ' + className;
     line.textContent = text;
-    transcriptEl.appendChild(line);
+    group.appendChild(line);
+
+    const details = document.createElement('details');
+    details.className = 'wire-details';
+    if (allWireExpanded) {
+      details.open = true;
+    }
+
+    const summary = document.createElement('summary');
+    summary.className = 'wire-summary';
+    summary.innerHTML = `<span class="wire-badge ${wireData.tampered ? 'corrupted' : ''}">Wire View</span> ${wireData.tampered ? 'Tampered Network Packet' : 'Encrypted Wire Frame'}`;
+    details.appendChild(summary);
+
+    const body = document.createElement('div');
+    body.className = 'wire-body';
+
+    body.innerHTML = `
+      <div class="wire-field">
+        <span class="wire-key">Sequence:</span>
+        <span class="wire-val">${wireData.seq}</span>
+      </div>
+      <div class="wire-field">
+        <span class="wire-key">Nonce (12B):</span>
+        <span class="wire-val">${toHex(wireData.nonce)}</span>
+      </div>
+      <div class="wire-field">
+        <span class="wire-key">Ciphertext (${wireData.ciphertext.length}B):</span>
+        <span class="wire-val ${wireData.tampered ? 'tampered-byte' : ''}">${toHex(wireData.ciphertext)}</span>
+      </div>
+      <div class="wire-field">
+        <span class="wire-key">Auth Tag (16B):</span>
+        <span class="wire-val">${toHex(wireData.tag)}</span>
+      </div>
+      <div class="wire-field">
+        <span class="wire-key">Wire Frame (${wireData.rawEnvelope.length}B):</span>
+        <span class="wire-val wire-frame">${toHex(wireData.rawEnvelope)}</span>
+      </div>
+    `;
+
+    details.appendChild(body);
+    group.appendChild(details);
+
+    transcriptEl.appendChild(group);
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
 
@@ -354,7 +411,19 @@
     envelope.set(tag, HEADER_SIZE + ciphertext.length);
 
     // 3. Sender displays message and advances outbound ratchet
-    appendChat(senderTranscript, `[you, seq ${seq}] ${plaintextStr}`, 'outbound');
+    appendChat(
+      senderTranscript,
+      `[you, seq ${seq}] ${plaintextStr}`,
+      'outbound',
+      {
+        seq: seq,
+        nonce: nonce,
+        ciphertext: ciphertext,
+        tag: tag,
+        rawEnvelope: envelope,
+        tampered: false
+      }
+    );
     senderState.sentCount++;
     senderState.outSeq++;
 
@@ -395,7 +464,19 @@
 
       // Successful verification
       const decryptedText = decoder.decode(decrypted);
-      appendChat(receiverTranscript, `[peer, seq ${parsed.seq}] ${decryptedText}`, 'inbound');
+      appendChat(
+        receiverTranscript,
+        `[peer, seq ${parsed.seq}] ${decryptedText}`,
+        'inbound',
+        {
+          seq: parsed.seq,
+          nonce: parsed.nonce,
+          ciphertext: parsed.ciphertext,
+          tag: parsed.tag,
+          rawEnvelope: deliveredEnvelope,
+          tampered: false
+        }
+      );
 
       receiverState.recvCount++;
       receiverState.inSeq++;
@@ -406,10 +487,23 @@
       receiverState.inKey = nextInInKey(receiverState, nextInKey);
     } catch (err) {
       // Integrity check failed: fail closed, discard message, preserve session
+      const ctLen = deliveredEnvelope.length > HEADER_SIZE + TAG_SIZE ? deliveredEnvelope.length - HEADER_SIZE - TAG_SIZE : 0;
+      const parsedNonce = deliveredEnvelope.length >= 26 ? deliveredEnvelope.subarray(14, 26) : new Uint8Array(12);
+      const parsedCt = deliveredEnvelope.length >= HEADER_SIZE + ctLen ? deliveredEnvelope.subarray(HEADER_SIZE, HEADER_SIZE + ctLen) : new Uint8Array(0);
+      const parsedTag = deliveredEnvelope.length >= HEADER_SIZE + ctLen + TAG_SIZE ? deliveredEnvelope.subarray(HEADER_SIZE + ctLen) : new Uint8Array(TAG_SIZE);
+
       appendChat(
         receiverTranscript,
         '[!] A message failed integrity verification and was discarded.',
-        'error'
+        'error',
+        {
+          seq: 'Failed Authentication',
+          nonce: parsedNonce,
+          ciphertext: parsedCt,
+          tag: parsedTag,
+          rawEnvelope: deliveredEnvelope,
+          tampered: true
+        }
       );
     }
 
@@ -426,6 +520,16 @@
   // --------------------------------------------------------------------------
   elBtnStart.addEventListener('click', startSession);
   elBtnEnd.addEventListener('click', endSession);
+
+  if (elBtnToggleWire) {
+    elBtnToggleWire.addEventListener('click', () => {
+      allWireExpanded = !allWireExpanded;
+      elBtnToggleWire.textContent = allWireExpanded ? 'Collapse Wire View' : 'Expand Wire View';
+      document.querySelectorAll('.wire-details').forEach(d => {
+        d.open = allWireExpanded;
+      });
+    });
+  }
 
   elAliceSend.addEventListener('click', () => {
     const text = elAliceInput.value.trim();

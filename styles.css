@@ -534,6 +534,105 @@ input:focus-visible {
   color: var(--color-status-success);
 }
 
+/* --------------------------------------------------------------------------
+   Wire View Collapsible Panels
+   -------------------------------------------------------------------------- */
+.chat-message-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wire-details {
+  margin-top: 2px;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  font-size: 0.75rem;
+}
+
+.wire-summary {
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  background-color: var(--color-surface-raised);
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background-color 0.12s ease;
+}
+
+.wire-summary:hover {
+  background-color: var(--color-surface-subtle);
+  color: var(--color-text-primary);
+}
+
+.wire-badge {
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background-color: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.wire-badge.corrupted {
+  background-color: var(--color-status-error-bg);
+  color: var(--color-status-error);
+}
+
+.wire-details[open] .wire-summary {
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.wire-body {
+  padding: 8px 10px;
+  background-color: var(--color-canvas);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wire-field {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  line-height: 1.4;
+}
+
+.wire-key {
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+.wire-val {
+  color: var(--color-text-primary);
+  word-break: break-all;
+}
+
+.wire-val.tampered-byte {
+  color: var(--color-status-error);
+  font-weight: 600;
+  background-color: var(--color-status-error-bg);
+  padding: 1px 3px;
+  border-radius: 2px;
+}
+
+.wire-frame {
+  color: var(--color-text-secondary);
+  font-size: 0.625rem;
+}
+
 .peer-composer {
   display: flex;
   gap: var(--space-2);
