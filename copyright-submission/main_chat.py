@@ -70,6 +70,11 @@ import textwrap
 import threading
 from typing import Optional
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 from cryptography.exceptions import InvalidTag
 
 # ---------------------------------------------------------------------------
@@ -249,18 +254,17 @@ def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]
     TAD Reference: Section 6.1 — Session Establishment
                Section 4.3 — Public Key Exchange Format
     """
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        server_sock.bind(("", port))
-        server_sock.listen(1)
-        print(f"[*] Listening on 0.0.0.0:{port} — waiting for peer...")
-        conn, addr = server_sock.accept()
-    finally:
-        server_sock.close()          # one-shot: reject further connections
+        server_sock = socket.create_server(("", port), family=socket.AF_INET6, dualstack_ipv6=True)
+    except Exception:
+        server_sock = socket.create_server(("", port))
+
+    print(f"[*] Listening on port {port} — waiting for peer...", flush=True)
+    conn, addr = server_sock.accept()
+    server_sock.close()          # one-shot: reject further connections
 
     peer_str = f"{addr[0]}:{addr[1]}"
-    print(f"[*] Peer connected from {peer_str}")
+    print(f"[*] Peer connected from {peer_str}", flush=True)
 
     try:
         # ── Key exchange ───────────────────────────────────────────────────
@@ -311,11 +315,12 @@ def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessio
     TAD Reference: Section 6.1 — Session Establishment
                Section 4.3 — Public Key Exchange Format
     """
+    target_host = "127.0.0.1" if host.lower() in ("localhost", "127.0.0.1") else host
     peer_str = f"{host}:{port}"
-    print(f"[*] Connecting to {peer_str}...")
-    conn = socket.create_connection((host, port), timeout=10)
+    print(f"[*] Connecting to {peer_str}...", flush=True)
+    conn = socket.create_connection((target_host, port), timeout=10)
     conn.settimeout(None)
-    print(f"[*] Connected.")
+    print(f"[*] Connected.", flush=True)
 
     try:
         # ── Key exchange ───────────────────────────────────────────────────
@@ -524,7 +529,8 @@ def _cmd_start(args: list[str]) -> None:
     print(
         f"[*] Session established — role: {role_label}, peer: {peer_str}\n"
         f"[*] K0: {k0_hex}... (first 8 bytes shown)\n"
-        f"[*] Type 'send <message>' to chat, 'status' to inspect, 'end' to close."
+        f"[*] Type 'send <message>' to chat, 'status' to inspect, 'end' to close.",
+        flush=True,
     )
 
 
