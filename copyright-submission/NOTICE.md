@@ -6,7 +6,15 @@ Copyright (c) 2026 Pawan Gupta and Project Contributors.
 
 ---
 
-### Attribution & Standards
+### Attribution & Originality Statement (PRD Section 9)
+
+This project's architecture is inspired by the Double Ratchet Algorithm used in the Signal Protocol (Trevor Perrin and Moxie Marlinspike, 2013), and uses well-established, publicly documented primitives: X25519 (ECDH), HKDF, and AES-256-GCM. None of these primitives or the general ratcheting concept are original inventions of this project.
+
+The original, copyrightable contribution of this project consists of: its specific source code and module structure; its specific message envelope format; its specific state-management and key-erasure logic; its documentation, diagrams, and test suite; and any implementation-specific choices not dictated by the underlying algorithms. This document and the resulting codebase should be described accordingly in any copyright filing — as an original software implementation of a known design pattern, not as a novel cryptographic invention.
+
+---
+
+### Underlying Cryptographic Standards
 
 This project implements cryptographic workflows and ratcheting concepts based on published standards:
 

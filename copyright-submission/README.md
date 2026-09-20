@@ -102,6 +102,8 @@ python demo_e2e.py
 
 ---
 
+---
+
 ## Running Unit Tests
 
 The test suite covers key agreement, ratchet non-reversibility, sequence integrity, tamper rejection, and malformed envelope parsing:
@@ -110,10 +112,25 @@ The test suite covers key agreement, ratchet non-reversibility, sequence integri
 pytest tests/ -v
 ```
 
-All **64 unit tests** should pass.
+All **66 unit tests** should pass.
 
 ---
 
-## License & Notice
+## Empirical Benchmarks (`benchmark.py`)
 
-See [NOTICE.md](NOTICE.md) for attribution, copyright notices, and security considerations.
+Per PRD Section 8.2 and Non-Functional Requirement NFR5, all performance claims are empirically measured on local hardware rather than quoted from generic sources:
+
+```bash
+python benchmark.py
+```
+
+Detailed performance logs and hardware specifications are recorded in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
+
+---
+
+## Documentation & Deliverables
+
+- [Product Requirements Document (PRD.md)](PRD.md) — Functional and non-functional requirements
+- [Technical Architecture Document (TECHNICAL_ARCHITECTURE.md)](TECHNICAL_ARCHITECTURE.md) — Low-level engineering design and wire formats
+- [Empirical Benchmark Results (BENCHMARK_RESULTS.md)](BENCHMARK_RESULTS.md) — Local cryptographic latency and throughput measurements
+- [Attribution & Notice (NOTICE.md)](NOTICE.md) — Originality statement (PRD Section 9) and cryptographic standards

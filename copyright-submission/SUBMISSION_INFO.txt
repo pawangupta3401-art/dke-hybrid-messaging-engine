@@ -23,11 +23,14 @@ Included Files & Directories:
     - protocol.py
     - main_chat.py
     - demo_e2e.py
+    - benchmark.py
     - tests/
         - __init__.py
         - test_dke.py
+    - PRD.md
     - README.md
     - NOTICE.md
+    - BENCHMARK_RESULTS.md
     - requirements.txt
     - SUBMISSION_INFO.txt
 
