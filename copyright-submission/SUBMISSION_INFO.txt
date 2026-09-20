@@ -28,6 +28,8 @@ Included Files & Directories:
         - __init__.py
         - test_dke.py
     - PRD.md
+    - FRONTEND_SPECIFICATION.md
+    - TECHNICAL_ARCHITECTURE.md
     - README.md
     - NOTICE.md
     - BENCHMARK_RESULTS.md

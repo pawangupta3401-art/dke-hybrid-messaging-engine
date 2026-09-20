@@ -113,7 +113,25 @@ _BANNER = (
     "Type 'help' for available commands."
 )
 
-_PROMPT = ">> "
+_PROMPT = "> "
+
+# ===========================================================================
+# Centralized User-Facing Strings (Frontend Specification Sections 5, 6, 7)
+# ===========================================================================
+MSG_WAITING_LISTEN = "[*] Waiting for peer to connect on port {port} ..."
+MSG_CONNECTING = "[*] Connecting to {host}:{port} ..."
+MSG_PEER_CONNECTED = "[*] Peer connected. Exchanging public keys ..."
+MSG_SESSION_ESTABLISHED = "[+] Secure session established. Type your message and press Enter."
+MSG_SESSION_ENDED = "[*] Session ended. Key material discarded."
+
+ERR_AUTH_FAILED = "[!] A message failed integrity verification and was discarded."
+ERR_OUT_OF_ORDER = "[!] Unexpected message order detected; message discarded. Session remains active."
+ERR_PEER_LOST = "[!] Peer connection lost. Session ended; start a new session to continue."
+ERR_UNKNOWN_CMD = "[!] Unknown command. Type 'help' to see available commands."
+ERR_NO_SESSION_SEND = "[!] No active session. Use 'start --listen' or 'start --connect' first."
+ERR_ALREADY_ACTIVE = "[!] A session is already active. Use 'end' first."
+ERR_NO_SESSION_END = "[!] No active session to end."
+ERR_NO_SESSION_STATUS = "[!] No active session."
 
 # ---------------------------------------------------------------------------
 # Global session state  (protected by _lock)
@@ -259,12 +277,12 @@ def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]
     except Exception:
         server_sock = socket.create_server(("", port))
 
-    print(f"[*] Listening on port {port} — waiting for peer...", flush=True)
+    print(MSG_WAITING_LISTEN.format(port=port), flush=True)
     conn, addr = server_sock.accept()
     server_sock.close()          # one-shot: reject further connections
 
     peer_str = f"{addr[0]}:{addr[1]}"
-    print(f"[*] Peer connected from {peer_str}", flush=True)
+    print(MSG_PEER_CONNECTED, flush=True)
 
     try:
         # ── Key exchange ───────────────────────────────────────────────────
@@ -317,10 +335,10 @@ def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessio
     """
     target_host = "127.0.0.1" if host.lower() in ("localhost", "127.0.0.1") else host
     peer_str = f"{host}:{port}"
-    print(f"[*] Connecting to {peer_str}...", flush=True)
+    print(MSG_CONNECTING.format(host=host, port=port), flush=True)
     conn = socket.create_connection((target_host, port), timeout=10)
     conn.settimeout(None)
-    print(f"[*] Connected.", flush=True)
+    print(MSG_PEER_CONNECTED, flush=True)
 
     try:
         # ── Key exchange ───────────────────────────────────────────────────
@@ -372,7 +390,7 @@ def _receive_loop() -> None:
         except ConnectionError:
             if _session_active.is_set():
                 print(
-                    f"\n[!] Peer disconnected. Session ended.\n{_PROMPT}",
+                    f"\n{ERR_PEER_LOST}\n{_PROMPT}",
                     end="",
                     flush=True,
                 )
@@ -380,9 +398,9 @@ def _receive_loop() -> None:
             return
         except OSError:
             return
-        except ParseError as exc:
+        except ParseError:
             print(
-                f"\n[!] Malformed envelope dropped: {exc}\n{_PROMPT}",
+                f"\n{ERR_AUTH_FAILED}\n{_PROMPT}",
                 end="",
                 flush=True,
             )
@@ -390,10 +408,10 @@ def _receive_loop() -> None:
 
         try:
             seq, nonce, ct, tag = decode_envelope(raw)
-        except ParseError as exc:
+        except ParseError:
             # Structural error — drop message, log metadata only, continue
             print(
-                f"\n[!] Malformed envelope dropped (seq unknown): {exc}\n{_PROMPT}",
+                f"\n{ERR_AUTH_FAILED}\n{_PROMPT}",
                 end="",
                 flush=True,
             )
@@ -406,9 +424,9 @@ def _receive_loop() -> None:
                 key = inbound_key(_session_state, seq)
                 plaintext = decrypt(key, ct, nonce, tag)   # raises on failure
                 rotate_receive(_session_state, nonce, seq)
-        except SequenceError as exc:
+        except SequenceError:
             print(
-                f"\n[!] Sequence error — message dropped (seq {seq}): {exc}\n{_PROMPT}",
+                f"\n{ERR_OUT_OF_ORDER}\n{_PROMPT}",
                 end="",
                 flush=True,
             )
@@ -416,16 +434,15 @@ def _receive_loop() -> None:
         except InvalidTag:
             # Authentication failed — fail closed, never display partial data
             print(
-                f"\n[!] Authentication failed — message dropped (seq {seq}). "
-                f"Possible tampering.\n{_PROMPT}",
+                f"\n{ERR_AUTH_FAILED}\n{_PROMPT}",
                 end="",
                 flush=True,
             )
             continue
-        except ValueError as exc:
+        except ValueError:
             # Protocol violation (e.g. nonce reuse) — drop message, continue
             print(
-                f"\n[!] Protocol violation — message dropped (seq {seq}): {exc}\n{_PROMPT}",
+                f"\n{ERR_AUTH_FAILED}\n{_PROMPT}",
                 end="",
                 flush=True,
             )
@@ -453,7 +470,7 @@ def _cmd_start(args: list[str]) -> None:
     global _recv_thread
 
     if _session_active.is_set():
-        print("[!] A session is already active. Use 'end' first.")
+        print(ERR_ALREADY_ACTIVE)
         return
 
     if len(args) < 2:
@@ -524,14 +541,7 @@ def _cmd_start(args: list[str]) -> None:
     _recv_thread = threading.Thread(target=_receive_loop, daemon=True, name="dke-recv")
     _recv_thread.start()
 
-    role_label = "listener" if role == "alice" else "connector"
-    k0_hex = bytes(_session_state.outbound.current_key).hex()[:16]
-    print(
-        f"[*] Session established — role: {role_label}, peer: {peer_str}\n"
-        f"[*] K0: {k0_hex}... (first 8 bytes shown)\n"
-        f"[*] Type 'send <message>' to chat, 'status' to inspect, 'end' to close.",
-        flush=True,
-    )
+    print(MSG_SESSION_ESTABLISHED, flush=True)
 
 
 def _cmd_send(parts: list[str]) -> None:
@@ -549,7 +559,7 @@ def _cmd_send(parts: list[str]) -> None:
                Section 6.2 — Steady-State Send
     """
     if not _session_active.is_set():
-        print("[!] No active session. Use 'start' first.")
+        print(ERR_NO_SESSION_SEND)
         return
     if not parts:
         print("[!] Usage: send <message>")
@@ -575,33 +585,25 @@ def _cmd_send(parts: list[str]) -> None:
 
 
 def _cmd_status() -> None:
-    """Display current session state and ratchet counters.
+    """Display current session state and message counters (no key material).
 
-    TAD Reference: Section 3.4 — status command
+    Frontend Spec Reference: Section 4, Section 5.4, Section 7.
     """
     if not _session_active.is_set():
-        print("[!] No active session.")
+        print(ERR_NO_SESSION_STATUS)
         return
 
     with _lock:
-        role   = _session_role
-        state  = _session_state
-        peer   = _session_peer
-        out_key_hex = bytes(state.outbound.current_key).hex()[:16]
-        in_key_hex  = bytes(state.inbound.current_key).hex()[:16]
-        out_seq = state.outbound.sequence_number
-        in_seq  = state.inbound.sequence_number
-
-    role_label = "listener" if role == "alice" else "connector"
+        state = _session_state
+        sent_count = state.outbound.sequence_number
+        recv_count = state.inbound.sequence_number
+        out_seq = sent_count + 1
+        in_seq = recv_count + 1
 
     print(
-        f"session  : ACTIVE\n"
-        f"role     : {role_label}\n"
-        f"peer     : {peer}\n"
-        f"out-key  : {out_key_hex}... (first 8 bytes)\n"
-        f"in-key   : {in_key_hex}... (first 8 bytes)\n"
-        f"out-seq  : {out_seq}\n"
-        f"in-seq   : {in_seq}"
+        f"Session: ACTIVE\n"
+        f"Messages sent: {sent_count}   Messages received: {recv_count}\n"
+        f"Current sequence (out): {out_seq}   Current sequence (in): {in_seq}"
     )
 
 
@@ -616,7 +618,7 @@ def _cmd_end() -> None:
     global _session_state, _session_sock, _session_role, _session_peer
 
     if not _session_active.is_set():
-        print("[!] No active session to end.")
+        print(ERR_NO_SESSION_END)
         return
 
     _session_active.clear()
@@ -635,7 +637,7 @@ def _cmd_end() -> None:
         _session_role  = None
         _session_peer  = ""
 
-    print("[*] Session ended. Key material discarded.")
+    print(MSG_SESSION_ENDED)
 
 
 def _cmd_help() -> None:
@@ -643,21 +645,22 @@ def _cmd_help() -> None:
     print(textwrap.dedent("""
       Commands
       --------
-      start --listen <port>        Wait for a peer to connect (you are the listener)
-      start --connect <host:port>  Connect to a listening peer
-      send <message>               Encrypt and send a message
-      status                       Show session state and ratchet counters
-      end                          Close session and discard all key material
-      help                         Show this help text
+      start --listen <port>        Starts as session initiator, waiting for peer to connect
+      start --connect <host:port>  Starts as joining party, connecting to waiting peer
+      send <message>               Encrypts and sends a message in an active session
+      status                       Shows current session state and message counters (no key material)
+      end                          Ends the session and discards all key material
+      help                         Lists available commands
       quit                         Exit the program
 
       Message display
       ---------------
-      [you, seq N] <text>          Message you sent, at sequence N
-      [peer, seq N] <text>         Message received from peer, at sequence N
+      [you, seq N] <text>          Message sent by you
+      [peer, seq N] <text>         Message received from peer
       [!] <text>                   Error or warning
       [*] <text>                   Status / info
-    """).rstrip())
+      [+] <text>                   Secure session established
+    """).strip())
 
 
 # ===========================================================================
@@ -696,7 +699,7 @@ def main() -> None:
         elif first in ("quit", "exit", "q"):
             sys.exit(0)
         else:
-            print(f"[!] Unknown command-line argument: '{first}'. Type 'help' for available commands.")
+            print(ERR_UNKNOWN_CMD)
 
     while True:
         try:
@@ -729,7 +732,7 @@ def main() -> None:
             print("  Goodbye.")
             sys.exit(0)
         else:
-            print(f"[!] Unknown command: '{cmd}'. Type 'help' for available commands.")
+            print(ERR_UNKNOWN_CMD)
 
 
 if __name__ == "__main__":

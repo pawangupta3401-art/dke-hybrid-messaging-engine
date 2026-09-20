@@ -136,17 +136,16 @@ def recv_expect_fail(sock: socket.socket, state: DKESessionState) -> str:
     raw = _recv_envelope(sock)
     try:
         seq, nonce, ct, tag = decode_envelope(raw)
-    except ParseError as exc:
-        return f"[!] Malformed envelope dropped (seq unknown): {exc}"
+    except ParseError:
+        return "[!] A message failed integrity verification and was discarded."
     try:
         key = inbound_key(state, seq)
         decrypt(key, ct, nonce, tag)     # must raise
         return "[!] BUG - tampered message was not rejected"
     except InvalidTag:
-        return (f"[!] Authentication failed - message dropped (seq {seq}). "
-                f"Possible tampering.")
-    except SequenceError as exc:
-        return f"[!] Sequence error - message dropped (seq {seq}): {exc}"
+        return "[!] A message failed integrity verification and was discarded."
+    except SequenceError:
+        return "[!] Unexpected message order detected; message discarded. Session remains active."
 
 
 # ---------------------------------------------------------------------------
@@ -189,21 +188,17 @@ def main() -> None:
     assert k0_a == k0_b, "K0 mismatch - handshake failed"
 
     terminal("Terminal A  (listener / Alice)", [
-        ">> start --listen 5050",
-        "[*] Listening on 0.0.0.0:5050 - waiting for peer...",
-        "[*] Peer connected from 127.0.0.1:<port>",
-        f"[*] Session established - role: listener, peer: 127.0.0.1:<port>",
-        f"[*] K0: {k0_a}... (first 8 bytes shown)",
-        "[*] Type 'send <message>' to chat, 'status' to inspect, 'end' to close.",
+        "> start --listen 5050",
+        "[*] Waiting for peer to connect on port 5050 ...",
+        "[*] Peer connected. Exchanging public keys ...",
+        "[+] Secure session established. Type your message and press Enter.",
     ])
 
     terminal("Terminal B  (connector / Bob)", [
-        ">> start --connect localhost:5050",
-        "[*] Connecting to localhost:5050...",
-        "[*] Connected.",
-        f"[*] Session established - role: connector, peer: 127.0.0.1:5050",
-        f"[*] K0: {k0_b}... (first 8 bytes shown)",
-        "[*] Type 'send <message>' to chat, 'status' to inspect, 'end' to close.",
+        "> start --connect localhost:5050",
+        "[*] Connecting to localhost:5050 ...",
+        "[*] Peer connected. Exchanging public keys ...",
+        "[+] Secure session established. Type your message and press Enter.",
     ])
 
     # -- Phase 2: Message exchange --------------------------------------
@@ -215,9 +210,9 @@ def main() -> None:
     seq1 = chat_send(conn_a, state_a, "Hello Bob! This message is end-to-end encrypted.")
     r_seq1, r_text1 = chat_recv(conn_b, state_b)
     both(
-        "Terminal A  - Alice sends (seq 0)",
+        "Terminal A  - Alice sends (seq 1)",
         [
-            ">> send Hello Bob! This message is end-to-end encrypted.",
+            "> send Hello Bob! This message is end-to-end encrypted.",
             f"[you, seq {seq1}] Hello Bob! This message is end-to-end encrypted.",
         ],
         "Terminal B  - Bob receives",
@@ -230,9 +225,9 @@ def main() -> None:
     seq2 = chat_send(conn_b, state_b, "Hi Alice! Keys auto-rotate after every message.")
     r_seq2, r_text2 = chat_recv(conn_a, state_a)
     both(
-        "Terminal B  - Bob sends (seq 0)",
+        "Terminal B  - Bob sends (seq 1)",
         [
-            ">> send Hi Alice! Keys auto-rotate after every message.",
+            "> send Hi Alice! Keys auto-rotate after every message.",
             f"[you, seq {seq2}] Hi Alice! Keys auto-rotate after every message.",
         ],
         "Terminal A  - Alice receives",
@@ -241,13 +236,13 @@ def main() -> None:
         ],
     )
 
-    # Message 3: Alice -> Bob (seq 1)
+    # Message 3: Alice -> Bob (seq 2)
     seq3 = chat_send(conn_a, state_a, "DKE ratchet is running. Forward secrecy active.")
     r_seq3, r_text3 = chat_recv(conn_b, state_b)
     both(
-        "Terminal A  - Alice sends (seq 1)",
+        "Terminal A  - Alice sends (seq 2)",
         [
-            ">> send DKE ratchet is running. Forward secrecy active.",
+            "> send DKE ratchet is running. Forward secrecy active.",
             f"[you, seq {seq3}] DKE ratchet is running. Forward secrecy active.",
         ],
         "Terminal B  - Bob receives",
@@ -261,33 +256,25 @@ def main() -> None:
     print("  PHASE 3 - Status Command")
     print(f"{'-'*60}")
 
-    out_key_a = bytes(state_a.outbound.current_key).hex()[:16]
-    in_key_a  = bytes(state_a.inbound.current_key).hex()[:16]
-    out_key_b = bytes(state_b.outbound.current_key).hex()[:16]
-    in_key_b  = bytes(state_b.inbound.current_key).hex()[:16]
+    sent_a = state_a.outbound.sequence_number
+    recv_a = state_a.inbound.sequence_number
+    sent_b = state_b.outbound.sequence_number
+    recv_b = state_b.inbound.sequence_number
 
     both(
         "Terminal A  - Alice: status",
         [
-            ">> status",
-            "session  : ACTIVE",
-            "role     : listener",
-            "peer     : 127.0.0.1:5050",
-            f"out-key  : {out_key_a}... (first 8 bytes)",
-            f"in-key   : {in_key_a}... (first 8 bytes)",
-            f"out-seq  : {state_a.outbound.sequence_number}",
-            f"in-seq   : {state_a.inbound.sequence_number}",
+            "> status",
+            "Session: ACTIVE",
+            f"Messages sent: {sent_a}   Messages received: {recv_a}",
+            f"Current sequence (out): {sent_a + 1}   Current sequence (in): {recv_a + 1}",
         ],
         "Terminal B  - Bob: status",
         [
-            ">> status",
-            "session  : ACTIVE",
-            "role     : connector",
-            "peer     : 127.0.0.1:5050",
-            f"out-key  : {out_key_b}... (first 8 bytes)",
-            f"in-key   : {in_key_b}... (first 8 bytes)",
-            f"out-seq  : {state_b.outbound.sequence_number}",
-            f"in-seq   : {state_b.inbound.sequence_number}",
+            "> status",
+            "Session: ACTIVE",
+            f"Messages sent: {sent_b}   Messages received: {recv_b}",
+            f"Current sequence (out): {sent_b + 1}   Current sequence (in): {recv_b + 1}",
         ],
     )
 
@@ -297,8 +284,8 @@ def main() -> None:
         "FAIL: Alice outbound != Bob inbound"
     assert bytes(state_b.outbound.current_key) == bytes(state_a.inbound.current_key), \
         "FAIL: Bob outbound != Alice inbound"
-    print(f"  Alice.outbound.key == Bob.inbound.key   [OK]  ({out_key_a}...)")
-    print(f"  Bob.outbound.key   == Alice.inbound.key [OK]  ({out_key_b}...)")
+    print(f"  Alice.outbound.key == Bob.inbound.key   [OK]")
+    print(f"  Bob.outbound.key   == Alice.inbound.key [OK]")
 
     # -- Phase 4: Tamper attack -----------------------------------------
     print(f"\n{'-'*60}")
@@ -315,9 +302,9 @@ def main() -> None:
     both(
         "Terminal A  - Alice sends (tampered byte[0] of ciphertext)",
         [
-            ">> send This message is tampered!",
+            "> send This message is tampered!",
             "  [internal: envelope built, byte[HEADER+0] XOR'd with 0xFF]",
-            f"[you, seq {state_a.outbound.sequence_number - 1}] This message is tampered!",
+            f"[you, seq {state_a.outbound.sequence_number}] This message is tampered!",
             "  (Alice's outbound key rotated normally - she is unaware of tamper)",
         ],
         "Terminal B  - Bob receives tampered envelope",
@@ -328,9 +315,8 @@ def main() -> None:
         ],
     )
 
-    assert "Authentication failed" in error_line, \
+    assert "failed integrity verification" in error_line, \
         f"Wrong error message: {error_line!r}"
-    assert "message dropped" in error_line
 
     print()
     print("  Tamper rejection verified:")
@@ -351,7 +337,7 @@ def main() -> None:
     _send_envelope(conn_a, env)
     rotate_send(state_a, nonce)
 
-    # Bob receives envelope with seq4 (which is 3, while bob expected 2)
+    # Bob receives envelope with seq4 (which is 4, while bob expected 3)
     raw = _recv_envelope(conn_b)
     seq_recvd, n_recvd, ct_recvd, tag_recvd = decode_envelope(raw)
     try:
@@ -359,16 +345,16 @@ def main() -> None:
         decrypt(key_b, ct_recvd, n_recvd, tag_recvd)
         rotate_receive(state_b, n_recvd, seq_recvd)
         res = f"[peer, seq {seq_recvd}] Message decrypted"
-    except SequenceError as exc:
-        res = f"[!] Sequence error - message dropped (seq {seq_recvd}): {exc}"
+    except SequenceError:
+        res = "[!] Unexpected message order detected; message discarded. Session remains active."
 
     both(
-        "Terminal A  - Alice sends next message (seq 3)",
+        "Terminal A  - Alice sends next message (seq 4)",
         [
-            f">> send Checking sequence behavior after drop",
+            "> send Checking sequence behavior after drop",
             f"[you, seq {seq4}] Checking sequence behavior after drop",
         ],
-        "Terminal B  - Bob receives (expected seq 2, received seq 3)",
+        "Terminal B  - Bob receives (expected seq 3, received seq 4)",
         [
             res,
             "  (Sequence gap detected and handled securely per DKE protocol rules)",
@@ -383,12 +369,12 @@ def main() -> None:
     both(
         "Terminal A  - Alice ends session",
         [
-            ">> end",
+            "> end",
             "[*] Session ended. Key material discarded.",
         ],
         "Terminal B  - Bob ends session",
         [
-            ">> end",
+            "> end",
             "[*] Session ended. Key material discarded.",
         ],
     )
@@ -406,7 +392,7 @@ def main() -> None:
     print("  Tamper detection    : PASS  (InvalidTag raised, rejected with [!] prefix)")
     print("  Cross-match check   : PASS  (outbound key == peer inbound key)")
     print("  Ratchet isolation   : PASS  (inbound seq unchanged after tamper)")
-    print("  All 64 unit tests   : run 'pytest tests/' to confirm")
+    print("  All 66 unit tests   : run 'pytest tests/' to confirm")
     print()
 
 
