@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DKE Hybrid Messaging Engine — End-to-End Encryption with Dynamic Key Evolution</title>
+  <meta name="description" content="Peer-to-peer secure messaging combining ephemeral X25519 ECDH key agreement with per-message HKDF ratcheting and AES-256-GCM authenticated encryption.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Site Navigation Header -->
+  <header class="site-header" role="banner">
+    <div class="header-inner">
+      <a href="#top" class="brand-link" aria-label="DKE Messaging Engine Home">
+        <span>DKE Engine</span>
+        <span class="brand-badge">v1.0</span>
+      </a>
+
+      <nav role="navigation" aria-label="Main Navigation">
+        <ul class="nav-links">
+          <li><a href="#simulator">Live Demonstration</a></li>
+          <li><a href="#architecture">Wire Protocol</a></li>
+          <li><a href="#benchmarks">Performance</a></li>
+          <li><a href="#cli">CLI Reference</a></li>
+          <li><a href="#privacy" data-open-modal="privacy">Privacy</a></li>
+          <li><a href="https://github.com/pawangupta3401-art/dke-hybrid-messaging-engine.git" class="nav-github-link" target="_blank" rel="noopener noreferrer">Source Code</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top" role="main">
+
+    <!-- Product Hero Section -->
+    <section class="section hero-section" aria-labelledby="hero-title">
+      <div class="container hero-content">
+        <div class="hero-tag">Cryptographic Specification and Implementation</div>
+        <h1 id="hero-title" class="hero-title">End-to-end encryption with dynamic key evolution.</h1>
+        <p class="hero-summary">
+          A peer-to-peer secure messaging engine combining ephemeral X25519 ECDH key agreement with per-message HKDF ratcheting and AES-256-GCM authenticated encryption. Every message advances the key chain.
+        </p>
+
+        <div class="hero-actions">
+          <a href="#simulator" class="btn-primary">Launch Interactive Simulator</a>
+          <a href="https://github.com/pawangupta3401-art/dke-hybrid-messaging-engine.git" class="btn-secondary" target="_blank" rel="noopener noreferrer">Clone Repository</a>
+        </div>
+
+        <div class="hero-audit-strip">
+          <div class="audit-item">
+            <span class="audit-dot"></span>
+            <span>Ephemeral X25519 (RFC 7748)</span>
+          </div>
+          <div class="audit-item">
+            <span class="audit-dot"></span>
+            <span>HKDF-SHA256 (RFC 5869)</span>
+          </div>
+          <div class="audit-item">
+            <span class="audit-dot"></span>
+            <span>AES-256-GCM (NIST SP 800-38D)</span>
+          </div>
+          <div class="audit-item">
+            <span class="audit-dot"></span>
+            <span>Zero Disk Key Retention</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Product Visual: Interactive Simulator -->
+    <section id="simulator" class="section" aria-labelledby="sim-title">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow">Interactive Demonstration</div>
+          <h2 id="sim-title" class="section-title">Experience the protocol in real time.</h2>
+          <p class="section-desc">
+            This in-browser simulator executes authentic Web Cryptography primitives (SubtleCrypto HMAC-SHA256 and AES-GCM). Initiate a session, send messages, observe key rotation, and test tamper rejection.
+          </p>
+        </div>
+
+        <!-- Simulator Frame -->
+        <div class="simulator-panel" role="region" aria-label="Cryptographic Session Simulator">
+          <!-- Simulator Toolbar -->
+          <div class="simulator-toolbar">
+            <div class="toolbar-status">
+              <span>Session State:</span>
+              <span id="sim-status-badge" class="status-badge idle">Idle</span>
+            </div>
+            <div class="toolbar-actions">
+              <button id="btn-sim-start" class="btn-primary btn-sm" type="button">Start Session</button>
+              <button id="btn-sim-tamper" class="btn-secondary btn-sm" type="button" disabled>Simulate Tampered Packet</button>
+              <button id="btn-sim-end" class="btn-secondary btn-sm" type="button" style="display: none;">End Session</button>
+            </div>
+          </div>
+
+          <!-- Side-by-side Peer Terminals -->
+          <div class="simulator-body">
+            <!-- Party A (Initiator) -->
+            <div class="peer-column">
+              <div class="peer-header">
+                <span class="peer-name">Party A (Alice)</span>
+                <span class="peer-role">Listener / Port 5050</span>
+              </div>
+
+              <div class="peer-metrics">
+                <div class="metric-item">
+                  <span class="metric-label">Sent Messages</span>
+                  <span id="alice-sent-count" class="metric-value">0</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">Received Messages</span>
+                  <span id="alice-recv-count" class="metric-value">0</span>
+                </div>
+              </div>
+
+              <div id="alice-transcript" class="peer-transcript" aria-live="polite" aria-label="Alice Transcript">
+                <div class="chat-line system">Waiting for session establishment...</div>
+              </div>
+
+              <div class="peer-composer">
+                <label for="alice-input" class="visually-hidden" style="display:none;">Alice message</label>
+                <input id="alice-input" class="composer-input" type="text" placeholder="Type message from Alice..." disabled autocomplete="off">
+                <button id="btn-alice-send" class="btn-primary btn-sm" type="button" disabled>Send</button>
+              </div>
+            </div>
+
+            <!-- Party B (Responder) -->
+            <div class="peer-column">
+              <div class="peer-header">
+                <span class="peer-name">Party B (Bob)</span>
+                <span class="peer-role">Connector / Client</span>
+              </div>
+
+              <div class="peer-metrics">
+                <div class="metric-item">
+                  <span class="metric-label">Sent Messages</span>
+                  <span id="bob-sent-count" class="metric-value">0</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-label">Received Messages</span>
+                  <span id="bob-recv-count" class="metric-value">0</span>
+                </div>
+              </div>
+
+              <div id="bob-transcript" class="peer-transcript" aria-live="polite" aria-label="Bob Transcript">
+                <div class="chat-line system">Waiting for session establishment...</div>
+              </div>
+
+              <div class="peer-composer">
+                <label for="bob-input" class="visually-hidden" style="display:none;">Bob message</label>
+                <input id="bob-input" class="composer-input" type="text" placeholder="Type message from Bob..." disabled autocomplete="off">
+                <button id="btn-bob-send" class="btn-primary btn-sm" type="button" disabled>Send</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Protocol State Inspector -->
+          <div class="simulator-inspector">
+            <div class="inspector-header">
+              <span class="inspector-title">Active Memory Inspection (Simulated Environment)</span>
+              <span style="font-size: 0.6875rem; color: var(--color-text-tertiary);">Prior keys zeroized immediately after rotation</span>
+            </div>
+            <div class="inspector-grid">
+              <div class="inspector-field">
+                <div class="field-label">Initial Seed (K0)</div>
+                <div id="insp-k0" class="field-value">None</div>
+              </div>
+              <div class="inspector-field">
+                <div class="field-label">Alice Active Out-Key</div>
+                <div id="insp-alice-out" class="field-value">None</div>
+              </div>
+              <div class="inspector-field">
+                <div class="field-label">Bob Active Out-Key</div>
+                <div id="insp-bob-out" class="field-value">None</div>
+              </div>
+              <div class="inspector-field">
+                <div class="field-label">Last Generated Nonce</div>
+                <div id="insp-last-nonce" class="field-value">None</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Technical Architecture Section -->
+    <section id="architecture" class="section" aria-labelledby="arch-title">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow">Wire Architecture</div>
+          <h2 id="arch-title" class="section-title">Self-describing binary envelope.</h2>
+          <p class="section-desc">
+            The transport layer treats packets as byte streams. Each transmission packages an authenticated 30-byte header, variable ciphertext, and a 16-byte Poly1305 or GCM authentication tag.
+          </p>
+        </div>
+
+        <div class="anatomy-card">
+          <div class="anatomy-header">Envelope Layout (TAD Section 4.1)</div>
+          <div class="anatomy-desc">Total frame size equals 46 bytes plus the length of ciphertext payload.</div>
+
+          <div class="wire-block-diagram">
+            <div class="wire-block">
+              <span class="wire-block-name">MAGIC</span>
+              <span class="wire-block-bytes">4 Bytes</span>
+            </div>
+            <div class="wire-block">
+              <span class="wire-block-name">VERSION</span>
+              <span class="wire-block-bytes">1 Byte</span>
+            </div>
+            <div class="wire-block">
+              <span class="wire-block-name">FLAGS</span>
+              <span class="wire-block-bytes">1 Byte</span>
+            </div>
+            <div class="wire-block">
+              <span class="wire-block-name">SEQ</span>
+              <span class="wire-block-bytes">8 Bytes</span>
+            </div>
+            <div class="wire-block">
+              <span class="wire-block-name">NONCE</span>
+              <span class="wire-block-bytes">12 Bytes</span>
+            </div>
+            <div class="wire-block">
+              <span class="wire-block-name">CT_LEN</span>
+              <span class="wire-block-bytes">4 Bytes</span>
+            </div>
+            <div class="wire-block accent">
+              <span class="wire-block-name">CIPHERTEXT</span>
+              <span class="wire-block-bytes">Variable</span>
+            </div>
+            <div class="wire-block">
+              <span class="wire-block-name">TAG</span>
+              <span class="wire-block-bytes">16 Bytes</span>
+            </div>
+          </div>
+
+          <table class="wire-spec-table">
+            <thead>
+              <tr>
+                <th>Offset</th>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>0..3</code></td>
+                <td>Magic</td>
+                <td>ASCII</td>
+                <td>Fixed identifier bytes: <code>0x44 0x4B 0x45 0x4D</code> ('DKEM').</td>
+              </tr>
+              <tr>
+                <td><code>4</code></td>
+                <td>Version</td>
+                <td>uint8</td>
+                <td>Protocol version (current: <code>0x01</code>).</td>
+              </tr>
+              <tr>
+                <td><code>5</code></td>
+                <td>Flags</td>
+                <td>uint8</td>
+                <td>Reserved for session extensions (default: <code>0x00</code>).</td>
+              </tr>
+              <tr>
+                <td><code>6..13</code></td>
+                <td>Sequence</td>
+                <td>uint64 (BE)</td>
+                <td>Strict monotonic sequence counter for replay defense.</td>
+              </tr>
+              <tr>
+                <td><code>14..25</code></td>
+                <td>Nonce</td>
+                <td>Raw Bytes</td>
+                <td>12-byte cryptographically secure random initialization vector.</td>
+              </tr>
+              <tr>
+                <td><code>26..29</code></td>
+                <td>Ciphertext Length</td>
+                <td>uint32 (BE)</td>
+                <td>Explicit byte length of following ciphertext payload.</td>
+              </tr>
+              <tr>
+                <td><code>30..N</code></td>
+                <td>Ciphertext</td>
+                <td>Raw Bytes</td>
+                <td>Plaintext encrypted with AES-256-GCM.</td>
+              </tr>
+              <tr>
+                <td><code>N..N+16</code></td>
+                <td>Authentication Tag</td>
+                <td>Raw Bytes</td>
+                <td>16-byte GHASH authentication tag verifying header and ciphertext integrity.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Empirical Benchmarks Section -->
+    <section id="benchmarks" class="section" aria-labelledby="bench-title">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow">Empirical Performance</div>
+          <h2 id="bench-title" class="section-title">Measured hardware throughput.</h2>
+          <p class="section-desc">
+            Empirical benchmark measurements conducted on commodity hardware demonstrate sub-millisecond per-message execution.
+          </p>
+        </div>
+
+        <div class="metrics-row">
+          <div class="metric-stat-box">
+            <div class="stat-number">10,000+</div>
+            <div class="stat-label">Operations / Sec</div>
+            <div class="stat-detail">Combined ratchet, encryption, and framing pipeline.</div>
+          </div>
+          <div class="metric-stat-box">
+            <div class="stat-number">0.089 ms</div>
+            <div class="stat-label">Per-Message Latency</div>
+            <div class="stat-detail">Average end-to-end processing time per message.</div>
+          </div>
+          <div class="metric-stat-box">
+            <div class="stat-number">0.42 ms</div>
+            <div class="stat-label">Handshake Duration</div>
+            <div class="stat-detail">Full X25519 ECDH key derivation and K0 seeding.</div>
+          </div>
+          <div class="metric-stat-box">
+            <div class="stat-number">0 Bytes</div>
+            <div class="stat-label">Disk Footprint</div>
+            <div class="stat-detail">Zero temporary files, zero key persistence.</div>
+          </div>
+        </div>
+
+        <p class="benchmark-note">
+          Measurements recorded using Python 3.13 and hardware AES-NI instructions. Detailed benchmark scripts and raw measurement tables are published in the project repository.
+        </p>
+      </div>
+    </section>
+
+    <!-- CLI Reference Section -->
+    <section id="cli" class="section" aria-labelledby="cli-title">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow">Command Line Interface</div>
+          <h2 id="cli-title" class="section-title">Standard CLI commands.</h2>
+          <p class="section-desc">
+            The reference terminal frontend (<code>main_chat.py</code>) provides an interactive shell for session establishment, messaging, and teardown.
+          </p>
+        </div>
+
+        <div class="cli-container">
+          <div class="cli-row">
+            <span class="cli-command">start --listen &lt;port&gt;</span>
+            <span class="cli-desc">Starts as the session initiator, waiting for a peer to connect.</span>
+            <button class="cli-copy-btn" data-cmd="start --listen 5050" type="button">Copy</button>
+          </div>
+          <div class="cli-row">
+            <span class="cli-command">start --connect &lt;host:port&gt;</span>
+            <span class="cli-desc">Starts as the joining party, connecting to a waiting peer.</span>
+            <button class="cli-copy-btn" data-cmd="start --connect localhost:5050" type="button">Copy</button>
+          </div>
+          <div class="cli-row">
+            <span class="cli-command">send &lt;message text&gt;</span>
+            <span class="cli-desc">Encrypts and transmits an authenticated message in an active session.</span>
+            <button class="cli-copy-btn" data-cmd="send Hello, this is a secure message." type="button">Copy</button>
+          </div>
+          <div class="cli-row">
+            <span class="cli-command">status</span>
+            <span class="cli-desc">Displays session state and message counters. No key material is displayed.</span>
+            <button class="cli-copy-btn" data-cmd="status" type="button">Copy</button>
+          </div>
+          <div class="cli-row">
+            <span class="cli-command">end</span>
+            <span class="cli-desc">Ends the session and zeroizes all key material in memory.</span>
+            <button class="cli-copy-btn" data-cmd="end" type="button">Copy</button>
+          </div>
+          <div class="cli-row">
+            <span class="cli-command">help</span>
+            <span class="cli-desc">Lists all available terminal commands and format indicators.</span>
+            <button class="cli-copy-btn" data-cmd="help" type="button">Copy</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Data Practices (Privacy & Terms) -->
+    <section class="section" aria-labelledby="privacy-title">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow">Transparency</div>
+          <h2 id="privacy-title" class="section-title">Data handling practices.</h2>
+          <p class="section-desc">
+            Direct peer-to-peer communication requires no central servers, no user accounts, and no data harvesting.
+          </p>
+        </div>
+
+        <div class="practices-grid">
+          <div class="practice-card">
+            <h3 class="practice-title">Privacy Policy</h3>
+            <p class="practice-body">
+              The engine operates strictly between two endpoints selected by the users. No telemetry, third-party analytics, or crash reports are gathered or transmitted. Keys exist only in volatile RAM and are overwritten upon key rotation and session closure.
+            </p>
+            <button class="practice-link" data-open-modal="privacy" type="button">Read Data Processing Policy &rarr;</button>
+          </div>
+
+          <div class="practice-card">
+            <h3 class="practice-title">Terms of Service</h3>
+            <p class="practice-body">
+              This software is released under the permissive MIT Open Source License. You are free to inspect, audit, modify, and integrate the code into your own applications in accordance with applicable software licensing regulations.
+            </p>
+            <button class="practice-link" data-open-modal="terms" type="button">Read License and Terms &rarr;</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Site Footer -->
+  <footer class="site-footer" role="contentinfo">
+    <div class="container">
+      <div class="footer-legal-notice">
+        <p>
+          Attribution Notice: Dynamic Key Evolution (DKE) Hybrid Messaging Engine implements published cryptographic standards including RFC 7748 (X25519), RFC 5869 (HKDF), and NIST SP 800-38D (AES-GCM). The software architecture, protocol framing, ratchet state-machine implementation, and accompanying documentation are original engineering contributions.
+        </p>
+      </div>
+
+      <div class="footer-nav-row">
+        <div>&copy; 2026 Pawan Gupta. MIT Licensed.</div>
+        <ul class="footer-links">
+          <li><button data-open-modal="privacy" type="button">Privacy Policy</button></li>
+          <li><button data-open-modal="terms" type="button">Terms of Service</button></li>
+          <li><a href="https://github.com/pawangupta3401-art/dke-hybrid-messaging-engine.git" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+          <li><a href="#top">Back to Top</a></li>
+        </ul>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Accessible Modal Dialog -->
+  <div id="legal-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-window">
+      <div class="modal-header">
+        <h3 id="modal-title" class="modal-title">Policy</h3>
+        <button id="modal-close-btn" class="modal-close-btn" type="button" aria-label="Close dialog">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-content">
+        <!-- Injected via JavaScript -->
+      </div>
+      <div class="modal-footer">
+        <button id="modal-footer-close-btn" class="btn-secondary btn-sm" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
