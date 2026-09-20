@@ -251,24 +251,30 @@ def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]
     """
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind(("", port))
-    server_sock.listen(1)
-    print(f"[*] Listening on 0.0.0.0:{port} — waiting for peer...")
+    try:
+        server_sock.bind(("", port))
+        server_sock.listen(1)
+        print(f"[*] Listening on 0.0.0.0:{port} — waiting for peer...")
+        conn, addr = server_sock.accept()
+    finally:
+        server_sock.close()          # one-shot: reject further connections
 
-    conn, addr = server_sock.accept()
-    server_sock.close()          # one-shot: reject further connections
     peer_str = f"{addr[0]}:{addr[1]}"
     print(f"[*] Peer connected from {peer_str}")
 
-    # ── Key exchange ───────────────────────────────────────────────────
-    priv, pub = crypto_core.generate_keypair()
-    conn.sendall(pub)                            # Alice sends first
-    peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)
+    try:
+        # ── Key exchange ───────────────────────────────────────────────────
+        priv, pub = crypto_core.generate_keypair()
+        conn.sendall(pub)                            # Alice sends first
+        peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)
 
-    # ── Key derivation ─────────────────────────────────────────────────
-    shared = crypto_core.derive_shared_secret(priv, peer_pub)
-    k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
-    state = DKESessionState.from_k0(k0)
+        # ── Key derivation ─────────────────────────────────────────────────
+        shared = crypto_core.derive_shared_secret(priv, peer_pub)
+        k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
+        state = DKESessionState.from_k0(k0)
+    except Exception as exc:
+        conn.close()
+        raise ConnectionError(f"Key exchange failed with peer {peer_str}: {exc}") from exc
 
     return conn, state, peer_str
 
@@ -305,21 +311,25 @@ def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessio
     TAD Reference: Section 6.1 — Session Establishment
                Section 4.3 — Public Key Exchange Format
     """
-    conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     peer_str = f"{host}:{port}"
     print(f"[*] Connecting to {peer_str}...")
-    conn.connect((host, port))
+    conn = socket.create_connection((host, port), timeout=10)
+    conn.settimeout(None)
     print(f"[*] Connected.")
 
-    # ── Key exchange ───────────────────────────────────────────────────
-    priv, pub = crypto_core.generate_keypair()
-    peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)  # Bob reads first
-    conn.sendall(pub)
+    try:
+        # ── Key exchange ───────────────────────────────────────────────────
+        priv, pub = crypto_core.generate_keypair()
+        peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)  # Bob reads first
+        conn.sendall(pub)
 
-    # ── Key derivation ─────────────────────────────────────────────────
-    shared = crypto_core.derive_shared_secret(priv, peer_pub)
-    k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
-    state = DKESessionState.from_k0(k0)
+        # ── Key derivation ─────────────────────────────────────────────────
+        shared = crypto_core.derive_shared_secret(priv, peer_pub)
+        k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
+        state = DKESessionState.from_k0(k0)
+    except Exception as exc:
+        conn.close()
+        raise ConnectionError(f"Key exchange failed with peer {peer_str}: {exc}") from exc
 
     return conn, state, peer_str
 
@@ -478,10 +488,22 @@ def _cmd_start(args: list[str]) -> None:
             return
 
     except ConnectionRefusedError:
-        print("[!] Connection refused. Is the listener running?")
+        print(f"[!] Connection refused. Is the listener running?")
+        return
+    except TimeoutError:
+        print(f"[!] Connection timed out connecting to peer.")
+        return
+    except socket.gaierror as exc:
+        print(f"[!] Hostname resolution failed: {exc}")
+        return
+    except ConnectionError as exc:
+        print(f"[!] {exc}")
         return
     except OSError as exc:
         print(f"[!] Network error: {exc}")
+        return
+    except Exception as exc:
+        print(f"[!] Failed to establish session: {exc}")
         return
 
     # ── Store session globals ────────────────────────────────────────────
@@ -640,14 +662,35 @@ def _cmd_help() -> None:
 def main() -> None:
     """Interactive REPL entry point.
 
-    Prints the banner then loops reading user input.  Each line is parsed
-    into a command and zero or more arguments.  Commands are dispatched to
-    the appropriate handler function.
+    Prints the banner then loops reading user input.  If command-line
+    arguments are provided (e.g. 'start --listen 5050' or
+    'start --connect localhost:5050'), executes the command initially
+    before continuing into the interactive REPL.
 
     TAD Reference: Section 3.4 — main_chat.py overview
     """
     print(_BANNER)
     print("")
+
+    # Parse initial command-line arguments if provided
+    # e.g.: python main_chat.py start --listen 5050
+    #       python main_chat.py start --connect localhost:5050
+    #       python main_chat.py --listen 5050
+    if len(sys.argv) > 1:
+        first = sys.argv[1].lower()
+        if first == "start":
+            _cmd_start(sys.argv[2:])
+        elif first in ("--listen", "-l", "--connect", "-c"):
+            _cmd_start(sys.argv[1:])
+        elif first in ("help", "--help", "-h"):
+            _cmd_help()
+            sys.exit(0)
+        elif first == "status":
+            _cmd_status()
+        elif first in ("quit", "exit", "q"):
+            sys.exit(0)
+        else:
+            print(f"[!] Unknown command-line argument: '{first}'. Type 'help' for available commands.")
 
     while True:
         try:
