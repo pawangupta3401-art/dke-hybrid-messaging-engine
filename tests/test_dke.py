@@ -878,3 +878,25 @@ class TestEndToEndPipeline:
         key_b = inbound_key(state_b, seq_r)
         with pytest.raises(InvalidTag):
             decrypt(key_b, ct_r, n_r, tag_r)
+
+    def test_session_state_wipe_zeros_all_keys(self, k0):
+        """DKESessionState.wipe() must overwrite both outbound and inbound key buffers with zeros."""
+        state = DKESessionState.from_k0(k0)
+        out_buf = state.outbound.current_key
+        in_buf = state.inbound.current_key
+        assert not all(b == 0 for b in out_buf)
+        assert not all(b == 0 for b in in_buf)
+
+        state.wipe()
+        assert all(b == 0 for b in out_buf)
+        assert all(b == 0 for b in in_buf)
+
+    def test_rotate_receive_rejects_nonce_reuse(self, k0):
+        """rotate_receive() must raise ValueError if the incoming nonce matches the previous message's nonce."""
+        state = DKESessionState.from_k0(k0)
+        reused_nonce = os.urandom(NONCE_SIZE)
+        # First receive with reused_nonce succeeds
+        rotate_receive(state, reused_nonce, received_seq=0)
+        # Second receive reusing the exact same nonce must be rejected
+        with pytest.raises(ValueError, match="Nonce reuse detected"):
+            rotate_receive(state, reused_nonce, received_seq=1)

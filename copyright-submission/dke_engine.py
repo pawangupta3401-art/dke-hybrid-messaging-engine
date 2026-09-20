@@ -157,6 +157,10 @@ class DirectionState:
     sequence_number: int = 0
     last_nonce: bytes = field(default_factory=lambda: b"\x00" * NONCE_SIZE)
 
+    def wipe(self) -> None:
+        """Best-effort erasure of current key material in memory."""
+        _erase(self.current_key)
+
 
 # ---------------------------------------------------------------------------
 # Session State
@@ -188,6 +192,11 @@ class DKESessionState:
 
     outbound: DirectionState
     inbound: DirectionState
+
+    def wipe(self) -> None:
+        """Best-effort erasure of both outbound and inbound key material."""
+        self.outbound.wipe()
+        self.inbound.wipe()
 
     # ------------------------------------------------------------------
     # Constructor helper
@@ -559,6 +568,9 @@ def rotate_receive(
                Section 6.2 — Steady-State Receive
     """
     validate_sequence(state.inbound.sequence_number, received_seq)  # raises before touching state
+
+    if state.inbound.sequence_number > 0 and nonce == state.inbound.last_nonce:
+        raise ValueError("Nonce reuse detected: incoming message reused last_nonce.")
 
     next_key: bytes = advance_key(state.inbound.current_key, nonce, received_seq)
 

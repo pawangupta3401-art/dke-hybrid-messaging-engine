@@ -159,6 +159,9 @@ def _recv_exactly(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
+MAX_CIPHERTEXT_SIZE: int = 64 * 1024 * 1024  # 64 MB maximum ciphertext payload safety cap
+
+
 def _recv_envelope(sock: socket.socket) -> bytes:
     """Read exactly one complete DKE envelope from the socket.
 
@@ -179,11 +182,18 @@ def _recv_envelope(sock: socket.socket) -> bytes:
     ------
     ConnectionError
         If the connection closes mid-read.
+    ParseError
+        If ``ct_len`` exceeds the maximum safe payload limit.
 
     TAD Reference: Section 4.1 — Envelope Structure
     """
     header_bytes = _recv_exactly(sock, HEADER_SIZE)
     (ct_len,) = struct.unpack_from("!I", header_bytes, offset=26)
+    if ct_len > MAX_CIPHERTEXT_SIZE:
+        raise ParseError(
+            f"Declared ciphertext length {ct_len} exceeds maximum safety limit "
+            f"({MAX_CIPHERTEXT_SIZE} bytes)."
+        )
     rest = _recv_exactly(sock, ct_len + TAG_SIZE)
     return header_bytes + rest
 
@@ -355,6 +365,13 @@ def _receive_loop() -> None:
             return
         except OSError:
             return
+        except ParseError as exc:
+            print(
+                f"\n[!] Malformed envelope dropped: {exc}\n{_PROMPT}",
+                end="",
+                flush=True,
+            )
+            continue
 
         try:
             seq, nonce, ct, tag = decode_envelope(raw)
@@ -369,6 +386,8 @@ def _receive_loop() -> None:
 
         try:
             with _lock:
+                if _session_state is None or not _session_active.is_set():
+                    return
                 key = inbound_key(_session_state, seq)
                 plaintext = decrypt(key, ct, nonce, tag)   # raises on failure
                 rotate_receive(_session_state, nonce, seq)
@@ -384,6 +403,14 @@ def _receive_loop() -> None:
             print(
                 f"\n[!] Authentication failed — message dropped (seq {seq}). "
                 f"Possible tampering.\n{_PROMPT}",
+                end="",
+                flush=True,
+            )
+            continue
+        except ValueError as exc:
+            # Protocol violation (e.g. nonce reuse) — drop message, continue
+            print(
+                f"\n[!] Protocol violation — message dropped (seq {seq}): {exc}\n{_PROMPT}",
                 end="",
                 flush=True,
             )
@@ -573,6 +600,8 @@ def _cmd_end() -> None:
                 _session_sock.close()
             except OSError:
                 pass
+        if _session_state is not None:
+            _session_state.wipe()   # Best-effort zeroization of remaining key material
         _session_state = None
         _session_sock  = None
         _session_role  = None
