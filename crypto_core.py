@@ -12,6 +12,8 @@ Design Constraints (from TAD Section 3.1 & 5.3)
 -------------------------------------------------
 * No hand-rolled ECC — X25519 operations delegate entirely to
   ``cryptography.hazmat.primitives.asymmetric.x25519``.
+  Ed25519 signing/verification delegates entirely to
+  ``cryptography.hazmat.primitives.asymmetric.ed25519``.
 * No hand-rolled HKDF — uses
   ``cryptography.hazmat.primitives.kdf.hkdf.HKDF``.
 * No disk writes — all key material lives in process memory only.
@@ -23,7 +25,11 @@ Key Hierarchy (TAD Section 5.1)
 --------------------------------
   os.urandom()
       │
-      └─► X25519 keypair generation
+      ├─► Ed25519 identity keypair  (long-term, one per process lifetime)
+      │       │
+      │       └─► sign(ephemeral ECDH pub)  →  64-byte signature
+      │
+      └─► X25519 ephemeral keypair (per-session)
                 │
                 │  ECDH(a_priv, b_pub) == ECDH(b_priv, a_pub)
                 ▼
@@ -32,10 +38,24 @@ Key Hierarchy (TAD Section 5.1)
                 │  HKDF-SHA256(secret, salt=None, info="dke-session-init-v1")
                 ▼
              K0 — Initial Symmetric Key (32 bytes / AES-256)
+
+MITM Mitigation (Section 3.1 — Identity Authentication)
+---------------------------------------------------------
+Before shared-secret derivation, each party signs its ephemeral X25519
+public key with its long-term Ed25519 identity private key.  The peer
+verifies this signature against the known identity public key.  An
+attacker who substitutes a different ephemeral key cannot produce a
+valid signature without the identity private key, so the forgery is
+detected and the session is aborted.
 """
 
 from __future__ import annotations
 
+from cryptography.exceptions import InvalidSignature  # re-exported for callers
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
@@ -57,6 +77,12 @@ PUBLIC_KEY_SIZE: int = 32
 
 #: Default output length for ``hkdf_derive()``, matching AES-256 key size.
 DEFAULT_KEY_LENGTH: int = 32
+
+#: Size of a raw Ed25519 public key in bytes.
+IDENTITY_PUBLIC_KEY_SIZE: int = 32
+
+#: Size of an Ed25519 signature in bytes.
+SIGNATURE_SIZE: int = 64
 
 
 # ---------------------------------------------------------------------------
@@ -233,3 +259,170 @@ def hkdf_derive(
     )
     derived_key: bytes = hkdf.derive(shared_secret)
     return derived_key
+
+
+# ---------------------------------------------------------------------------
+# Ed25519 Identity Authentication
+# ---------------------------------------------------------------------------
+
+
+def generate_identity_keypair() -> tuple[Ed25519PrivateKey, bytes]:
+    """Generate a long-term Ed25519 identity key pair.
+
+    Delegates entirely to
+    ``cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey.generate()``.
+    No elliptic-curve arithmetic is performed in this module.
+
+    The identity key pair is generated **once per process lifetime** and
+    never serialised to disk by this function.  It is used only for
+    authenticating ephemeral X25519 public keys during session
+    establishment (MITM mitigation).
+
+    Returns
+    -------
+    tuple[Ed25519PrivateKey, bytes]
+        A 2-tuple ``(private_key, public_key_bytes)`` where:
+
+        * ``private_key`` is the opaque ``Ed25519PrivateKey`` object
+          required by :func:`sign_public_key`.
+        * ``public_key_bytes`` is the raw 32-byte encoding of the
+          corresponding Ed25519 public key, to be shared out-of-band
+          with the peer (the "identity fingerprint").
+
+    Examples
+    --------
+    >>> id_priv, id_pub = generate_identity_keypair()
+    >>> assert len(id_pub) == 32
+
+    TAD Reference: Section 3.1 — Identity Authentication (MITM Mitigation)
+    """
+    private_key: Ed25519PrivateKey = Ed25519PrivateKey.generate()
+    public_key_bytes: bytes = private_key.public_key().public_bytes_raw()
+    return private_key, public_key_bytes
+
+
+def sign_public_key(
+    identity_private: Ed25519PrivateKey,
+    ecdh_pub_bytes: bytes,
+) -> bytes:
+    """Sign an ephemeral X25519 public key with the Ed25519 identity private key.
+
+    Produces a 64-byte Ed25519 signature over ``ecdh_pub_bytes``.  The
+    peer will verify this signature against the sender's known identity
+    public key before accepting the ephemeral key for ECDH.
+
+    Delegates entirely to ``Ed25519PrivateKey.sign()``.  No signing
+    arithmetic is performed in this module.
+
+    Parameters
+    ----------
+    identity_private : Ed25519PrivateKey
+        The local party's long-term Ed25519 identity private key, as
+        returned by the first element of :func:`generate_identity_keypair`.
+    ecdh_pub_bytes : bytes
+        The raw 32-byte X25519 ephemeral public key to authenticate.
+        Must be exactly :data:`PUBLIC_KEY_SIZE` (32) bytes.
+
+    Returns
+    -------
+    bytes
+        64-byte Ed25519 signature.
+
+    Raises
+    ------
+    ValueError
+        If ``ecdh_pub_bytes`` is not exactly 32 bytes.
+
+    Examples
+    --------
+    >>> id_priv, id_pub = generate_identity_keypair()
+    >>> _, ecdh_pub = generate_keypair()
+    >>> sig = sign_public_key(id_priv, ecdh_pub)
+    >>> assert len(sig) == 64
+
+    TAD Reference: Section 3.1 — Identity Authentication (MITM Mitigation)
+    """
+    if len(ecdh_pub_bytes) != PUBLIC_KEY_SIZE:
+        raise ValueError(
+            f"ecdh_pub_bytes must be exactly {PUBLIC_KEY_SIZE} bytes, "
+            f"got {len(ecdh_pub_bytes)}."
+        )
+    return identity_private.sign(ecdh_pub_bytes)
+
+
+def verify_public_key(
+    identity_pub_bytes: bytes,
+    ecdh_pub_bytes: bytes,
+    signature: bytes,
+) -> None:
+    """Verify an Ed25519 signature over an ephemeral X25519 public key.
+
+    Authenticates that ``ecdh_pub_bytes`` was signed by the holder of the
+    identity private key corresponding to ``identity_pub_bytes``.  If
+    verification succeeds the function returns ``None``; if it fails, it
+    raises :class:`cryptography.exceptions.InvalidSignature`.
+
+    Delegates entirely to ``Ed25519PublicKey.verify()``.  No verification
+    arithmetic is performed in this module.
+
+    .. warning::
+        This function MUST be called before :func:`derive_shared_secret`.
+        Proceeding with key derivation on an unauthenticated ephemeral key
+        defeats the MITM protection entirely.
+
+    Parameters
+    ----------
+    identity_pub_bytes : bytes
+        The peer's raw 32-byte Ed25519 identity public key, obtained
+        out-of-band (e.g. printed at peer startup and manually compared —
+        similar to Signal's "safety numbers").
+        Must be exactly :data:`IDENTITY_PUBLIC_KEY_SIZE` (32) bytes.
+    ecdh_pub_bytes : bytes
+        The peer's raw 32-byte X25519 ephemeral public key received over
+        the transport.
+        Must be exactly :data:`PUBLIC_KEY_SIZE` (32) bytes.
+    signature : bytes
+        The 64-byte Ed25519 signature received alongside ``ecdh_pub_bytes``.
+        Must be exactly :data:`SIGNATURE_SIZE` (64) bytes.
+
+    Returns
+    -------
+    None
+        Returned only when the signature is valid.
+
+    Raises
+    ------
+    cryptography.exceptions.InvalidSignature
+        If the signature does not authenticate ``ecdh_pub_bytes`` under
+        ``identity_pub_bytes``.  The caller MUST abort the session.
+    ValueError
+        If any argument has an unexpected length.
+
+    Examples
+    --------
+    >>> id_priv, id_pub = generate_identity_keypair()
+    >>> _, ecdh_pub = generate_keypair()
+    >>> sig = sign_public_key(id_priv, ecdh_pub)
+    >>> verify_public_key(id_pub, ecdh_pub, sig)   # returns None — OK
+
+    TAD Reference: Section 3.1 — Identity Authentication (MITM Mitigation)
+    """
+    if len(identity_pub_bytes) != IDENTITY_PUBLIC_KEY_SIZE:
+        raise ValueError(
+            f"identity_pub_bytes must be exactly {IDENTITY_PUBLIC_KEY_SIZE} bytes, "
+            f"got {len(identity_pub_bytes)}."
+        )
+    if len(ecdh_pub_bytes) != PUBLIC_KEY_SIZE:
+        raise ValueError(
+            f"ecdh_pub_bytes must be exactly {PUBLIC_KEY_SIZE} bytes, "
+            f"got {len(ecdh_pub_bytes)}."
+        )
+    if len(signature) != SIGNATURE_SIZE:
+        raise ValueError(
+            f"signature must be exactly {SIGNATURE_SIZE} bytes, "
+            f"got {len(signature)}."
+        )
+
+    peer_pub_key: Ed25519PublicKey = Ed25519PublicKey.from_public_bytes(identity_pub_bytes)
+    # Raises cryptography.exceptions.InvalidSignature on failure.
+    peer_pub_key.verify(signature, ecdh_pub_bytes)

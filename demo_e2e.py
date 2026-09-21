@@ -27,7 +27,14 @@ from cryptography.exceptions import InvalidTag
 import crypto_core
 import dke_engine
 import protocol
-from crypto_core import SESSION_INFO, PUBLIC_KEY_SIZE
+from crypto_core import (
+    SESSION_INFO,
+    PUBLIC_KEY_SIZE,
+    SIGNATURE_SIZE,
+    generate_identity_keypair,
+    sign_public_key,
+    verify_public_key,
+)
 from dke_engine import (
     DKESessionState, SequenceError,
     outbound_params, inbound_key, rotate_send, rotate_receive,
@@ -67,6 +74,8 @@ PORT = 15050
 
 
 def handshake_listener(port: int) -> tuple[socket.socket, DKESessionState]:
+    """Listener-side authenticated handshake (Alice)."""
+    id_priv, id_pub = generate_identity_keypair()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", port))
@@ -74,22 +83,30 @@ def handshake_listener(port: int) -> tuple[socket.socket, DKESessionState]:
     conn, addr = srv.accept()
     srv.close()
     priv, pub = crypto_core.generate_keypair()
-    conn.sendall(pub)                               # listener sends first
-    peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)
+    sig = sign_public_key(id_priv, pub)
+    conn.sendall(pub + sig)                              # listener sends 96 B first
+    peer_payload = _recv_exactly(conn, PUBLIC_KEY_SIZE + SIGNATURE_SIZE)
+    peer_pub = peer_payload[:PUBLIC_KEY_SIZE]
+    # (peer sig not verified in demo — no out-of-band key exchange)
     shared = crypto_core.derive_shared_secret(priv, peer_pub)
     k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
-    return conn, DKESessionState.from_k0(k0)
+    return conn, DKESessionState.from_k0(k0), id_pub
 
 
 def handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessionState]:
+    """Connector-side authenticated handshake (Bob)."""
+    id_priv, id_pub = generate_identity_keypair()
     conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     conn.connect((host, port))
     priv, pub = crypto_core.generate_keypair()
-    peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)  # connector reads first
-    conn.sendall(pub)
+    peer_payload = _recv_exactly(conn, PUBLIC_KEY_SIZE + SIGNATURE_SIZE)  # connector reads first
+    peer_pub = peer_payload[:PUBLIC_KEY_SIZE]
+    # (peer sig not verified in demo — no out-of-band key exchange)
+    sig = sign_public_key(id_priv, pub)
+    conn.sendall(pub + sig)
     shared = crypto_core.derive_shared_secret(priv, peer_pub)
     k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
-    return conn, DKESessionState.from_k0(k0)
+    return conn, DKESessionState.from_k0(k0), id_pub
 
 
 def chat_send(sock: socket.socket,
@@ -167,37 +184,43 @@ def main() -> None:
     conn_b_holder: list = []
 
     def run_listener():
-        conn, state = handshake_listener(PORT)
-        conn_a_holder.extend([conn, state])
+        conn, state, id_pub = handshake_listener(PORT)
+        conn_a_holder.extend([conn, state, id_pub])
 
     def run_connector():
         time.sleep(0.08)
-        conn, state = handshake_connector("127.0.0.1", PORT)
-        conn_b_holder.extend([conn, state])
+        conn, state, id_pub = handshake_connector("127.0.0.1", PORT)
+        conn_b_holder.extend([conn, state, id_pub])
 
     t1 = threading.Thread(target=run_listener,  daemon=True)
     t2 = threading.Thread(target=run_connector, daemon=True)
     t1.start(); t2.start()
     t1.join(timeout=5); t2.join(timeout=5)
 
-    conn_a, state_a = conn_a_holder[0], conn_a_holder[1]
-    conn_b, state_b = conn_b_holder[0], conn_b_holder[1]
+    conn_a, state_a, id_pub_a = conn_a_holder[0], conn_a_holder[1], conn_a_holder[2]
+    conn_b, state_b, id_pub_b = conn_b_holder[0], conn_b_holder[1], conn_b_holder[2]
 
     k0_a = bytes(state_a.outbound.current_key).hex()[:16]
     k0_b = bytes(state_b.inbound.current_key).hex()[:16]
     assert k0_a == k0_b, "K0 mismatch - handshake failed"
 
     terminal("Terminal A  (listener / Alice)", [
+        "[*] Your identity key (share with peer):",
+        f"    {id_pub_a.hex()}",
         "> start --listen 5050",
         "[*] Waiting for peer to connect on port 5050 ...",
         "[*] Peer connected. Exchanging public keys ...",
+        "[!] No --peer-key supplied - identity verification DISABLED for this session.",
         "[+] Secure session established. Type your message and press Enter.",
     ])
 
     terminal("Terminal B  (connector / Bob)", [
+        "[*] Your identity key (share with peer):",
+        f"    {id_pub_b.hex()}",
         "> start --connect localhost:5050",
         "[*] Connecting to localhost:5050 ...",
         "[*] Peer connected. Exchanging public keys ...",
+        "[!] No --peer-key supplied - identity verification DISABLED for this session.",
         "[+] Secure session established. Type your message and press Enter.",
     ])
 

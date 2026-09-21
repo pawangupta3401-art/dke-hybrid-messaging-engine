@@ -70,7 +70,7 @@ import os
 import struct
 
 import pytest
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidTag, InvalidSignature
 
 import sys
 import pathlib
@@ -83,6 +83,11 @@ from crypto_core import (
     SESSION_INFO,
     PUBLIC_KEY_SIZE,
     DEFAULT_KEY_LENGTH,
+    generate_identity_keypair,
+    sign_public_key,
+    verify_public_key,
+    IDENTITY_PUBLIC_KEY_SIZE,
+    SIGNATURE_SIZE,
 )
 from dke_engine import (
     DirectionState,
@@ -900,3 +905,198 @@ class TestEndToEndPipeline:
         # Second receive reusing the exact same nonce must be rejected
         with pytest.raises(ValueError, match="Nonce reuse detected"):
             rotate_receive(state, reused_nonce, received_seq=1)
+
+
+# ===========================================================================
+# Ed25519 Identity Authentication Tests
+# ===========================================================================
+
+
+class TestEd25519Auth:
+    """Tests for Ed25519 identity key generation, signing, and verification.
+
+    Covers the MITM-mitigation layer added in crypto_core.py:
+      - generate_identity_keypair()
+      - sign_public_key()
+      - verify_public_key()
+
+    Test Coverage
+    -------------
+    (a) Valid signature allows the session to proceed (no exception raised).
+    (b) Tampered / forged signature causes rejection (InvalidSignature raised).
+    """
+
+    # -----------------------------------------------------------------------
+    # generate_identity_keypair()
+    # -----------------------------------------------------------------------
+
+    def test_generate_identity_keypair_returns_correct_types(self):
+        """generate_identity_keypair() returns (private_key_obj, 32-byte public key)."""
+        id_priv, id_pub = generate_identity_keypair()
+        # Public key must be a raw bytes object of exactly IDENTITY_PUBLIC_KEY_SIZE bytes
+        assert isinstance(id_pub, bytes)
+        assert len(id_pub) == IDENTITY_PUBLIC_KEY_SIZE  # 32
+
+    def test_generate_identity_keypair_unique_each_call(self):
+        """Two generate_identity_keypair() calls produce different key pairs."""
+        _, pub1 = generate_identity_keypair()
+        _, pub2 = generate_identity_keypair()
+        assert pub1 != pub2, "Identity public keys must be unique per call"
+
+    # -----------------------------------------------------------------------
+    # sign_public_key()
+    # -----------------------------------------------------------------------
+
+    def test_sign_public_key_returns_64_bytes(self):
+        """sign_public_key() returns exactly SIGNATURE_SIZE (64) bytes."""
+        id_priv, _ = generate_identity_keypair()
+        _, ecdh_pub = generate_keypair()
+        sig = sign_public_key(id_priv, ecdh_pub)
+        assert isinstance(sig, bytes)
+        assert len(sig) == SIGNATURE_SIZE  # 64
+
+    def test_sign_public_key_rejects_wrong_length_input(self):
+        """sign_public_key() raises ValueError when ecdh_pub_bytes is not 32 bytes."""
+        id_priv, _ = generate_identity_keypair()
+        with pytest.raises(ValueError, match="ecdh_pub_bytes must be exactly 32 bytes"):
+            sign_public_key(id_priv, b"too_short")
+
+    # -----------------------------------------------------------------------
+    # verify_public_key() — VALID path (criterion a)
+    # -----------------------------------------------------------------------
+
+    def test_verify_valid_signature_succeeds(self):
+        """(a) A valid signature allows proceed — verify_public_key() returns None."""
+        id_priv, id_pub = generate_identity_keypair()
+        _, ecdh_pub = generate_keypair()
+        sig = sign_public_key(id_priv, ecdh_pub)
+        # Must return None (no exception) for a valid signature
+        result = verify_public_key(id_pub, ecdh_pub, sig)
+        assert result is None
+
+    def test_verify_valid_signature_different_ecdh_keys(self):
+        """(a) Each freshly generated ECDH key verifies with the same identity key."""
+        id_priv, id_pub = generate_identity_keypair()
+        for _ in range(3):
+            _, ecdh_pub = generate_keypair()
+            sig = sign_public_key(id_priv, ecdh_pub)
+            verify_public_key(id_pub, ecdh_pub, sig)  # must not raise
+
+    # -----------------------------------------------------------------------
+    # verify_public_key() — INVALID paths (criterion b)
+    # -----------------------------------------------------------------------
+
+    def test_verify_rejects_tampered_ecdh_key(self):
+        """(b) Signing key A's ECDH pub, verifying against different ECDH pub → InvalidSignature.
+
+        Models an active MITM that substitutes their own ephemeral key but
+        cannot produce a valid signature for it.
+        """
+        id_priv, id_pub = generate_identity_keypair()
+        _, ecdh_pub_legitimate = generate_keypair()
+        _, ecdh_pub_mitm = generate_keypair()  # attacker's substituted key
+
+        sig = sign_public_key(id_priv, ecdh_pub_legitimate)
+
+        # Attacker sends their own ECDH key with the legitimate signature
+        with pytest.raises(InvalidSignature):
+            verify_public_key(id_pub, ecdh_pub_mitm, sig)
+
+    def test_verify_rejects_forged_signature(self):
+        """(b) A random 64-byte signature is rejected — InvalidSignature raised."""
+        id_priv, id_pub = generate_identity_keypair()
+        _, ecdh_pub = generate_keypair()
+        forged_sig = os.urandom(SIGNATURE_SIZE)  # random garbage, not a valid Ed25519 sig
+
+        with pytest.raises(InvalidSignature):
+            verify_public_key(id_pub, ecdh_pub, forged_sig)
+
+    def test_verify_rejects_wrong_identity_key(self):
+        """(b) Signature made by identity key A, verification with key B → InvalidSignature.
+
+        Models the scenario where the verifier has the wrong identity key
+        (or an attacker tries to use their own identity key).
+        """
+        id_priv_a, _ = generate_identity_keypair()
+        _, id_pub_b = generate_identity_keypair()  # a different party's identity key
+        _, ecdh_pub = generate_keypair()
+
+        sig = sign_public_key(id_priv_a, ecdh_pub)  # signed by A
+
+        with pytest.raises(InvalidSignature):
+            verify_public_key(id_pub_b, ecdh_pub, sig)  # verified against B
+
+    def test_verify_rejects_truncated_signature(self):
+        """(b) A signature shorter than 64 bytes is rejected — ValueError raised."""
+        id_priv, id_pub = generate_identity_keypair()
+        _, ecdh_pub = generate_keypair()
+        # verify_public_key() validates length before calling Ed25519PublicKey.verify()
+        with pytest.raises(ValueError, match="signature must be exactly 64 bytes"):
+            verify_public_key(id_pub, ecdh_pub, b"\x00" * 32)  # only 32 bytes
+
+    def test_verify_rejects_wrong_length_identity_key(self):
+        """verify_public_key() raises ValueError when identity_pub_bytes is wrong length."""
+        _, ecdh_pub = generate_keypair()
+        fake_sig = os.urandom(SIGNATURE_SIZE)
+        with pytest.raises(ValueError, match="identity_pub_bytes must be exactly 32 bytes"):
+            verify_public_key(b"tooshort", ecdh_pub, fake_sig)
+
+    # -----------------------------------------------------------------------
+    # Full handshake integration
+    # -----------------------------------------------------------------------
+
+    def test_handshake_integration_valid_signatures(self):
+        """(a) End-to-end: two parties sign/verify each other's ECDH keys → same K0.
+
+        Simulates the complete authenticated handshake:
+          1. Alice and Bob each generate identity and ephemeral ECDH key pairs.
+          2. Each signs their ECDH public key with their identity private key.
+          3. Each verifies the other's signature against the known identity key.
+          4. Both derive the shared secret via ECDH → HKDF → same K0.
+        """
+        # Identity keys (long-term, known out-of-band)
+        id_priv_alice, id_pub_alice = generate_identity_keypair()
+        id_priv_bob, id_pub_bob = generate_identity_keypair()
+
+        # Ephemeral ECDH keys (per-session)
+        priv_alice, pub_alice = generate_keypair()
+        priv_bob, pub_bob = generate_keypair()
+
+        # Sign ECDH public keys
+        sig_alice = sign_public_key(id_priv_alice, pub_alice)
+        sig_bob = sign_public_key(id_priv_bob, pub_bob)
+
+        # Each party verifies the other — must not raise
+        verify_public_key(id_pub_alice, pub_alice, sig_alice)  # Bob verifies Alice
+        verify_public_key(id_pub_bob, pub_bob, sig_bob)        # Alice verifies Bob
+
+        # ECDH → HKDF → K0
+        secret_alice = derive_shared_secret(priv_alice, pub_bob)
+        secret_bob = derive_shared_secret(priv_bob, pub_alice)
+        assert secret_alice == secret_bob, "ECDH shared secrets must match"
+
+        k0_alice = hkdf_derive(secret_alice, info=SESSION_INFO)
+        k0_bob = hkdf_derive(secret_bob, info=SESSION_INFO)
+        assert k0_alice == k0_bob, "Derived K0 must be identical on both sides"
+        assert len(k0_alice) == 32
+
+    def test_handshake_integration_mitm_tampered_sig_rejected(self):
+        """(b) MITM substitutes an ephemeral key → InvalidSignature before HKDF.
+
+        An active MITM replaces Alice's genuine ECDH public key (pub_alice) with
+        their own (pub_mitm) while forwarding the original signature.  Bob
+        detects the substitution during verify_public_key() and MUST raise
+        InvalidSignature before any key derivation takes place.
+        """
+        id_priv_alice, id_pub_alice = generate_identity_keypair()
+
+        # Alice generates her ephemeral key and signs it
+        priv_alice, pub_alice = generate_keypair()
+        sig_alice = sign_public_key(id_priv_alice, pub_alice)
+
+        # MITM substitutes a different ECDH key while reusing Alice's signature
+        _, pub_mitm = generate_keypair()
+
+        # Bob verifies: the substituted key MUST be rejected
+        with pytest.raises(InvalidSignature):
+            verify_public_key(id_pub_alice, pub_mitm, sig_alice)

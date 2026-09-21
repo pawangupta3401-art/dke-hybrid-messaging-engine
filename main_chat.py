@@ -10,9 +10,12 @@ Top-level CLI entry point.  Wires together the full session lifecycle:
 
   1. Interactive REPL with commands: start, send, status, end, help, quit.
   2. TCP socket transport (listener or connector).
-  3. X25519 public-key exchange during handshake (TAD Section 6.1).
-  4. Shared secret → HKDF → K0 → DKESessionState seeding.
-  5. Steady-state bidirectional encrypted message loop (TAD Section 6.2).
+  3. Ed25519 identity key generation and fingerprint display on startup.
+  4. Authenticated X25519 public-key exchange during handshake:
+       each party sends  ecdh_pub (32 B) || ed25519_sig (64 B) = 96 B.
+  5. Signature verification before ECDH — rejects MITM attempts.
+  6. Shared secret → HKDF → K0 → DKESessionState seeding.
+  7. Steady-state bidirectional encrypted message loop (TAD Section 6.2).
 
 Usage
 -----
@@ -26,19 +29,29 @@ Run two terminals side-by-side:
       python main_chat.py
       >> start --connect 127.0.0.1:9000
 
+  To enable MITM protection, pass the peer's identity key (printed at
+  their startup) as a hex string:
+
+      >> start --listen 9000 --peer-key <alice_identity_hex>
+      >> start --connect 127.0.0.1:9000 --peer-key <bob_identity_hex>
+
 Once connected, both sides can type:
       >> send Hello!
       >> status
       >> end
 
-Session Establishment Sequence (TAD Section 6.1)
--------------------------------------------------
+Session Establishment Sequence (TAD Section 6.1 — with Ed25519 auth)
+---------------------------------------------------------------------
   Alice (listener)                        Bob (connector)
+    generate_identity_keypair()             generate_identity_keypair()
     generate_keypair()                      generate_keypair()
-    send(a_pub)   ─────────────────────►  recv → peer_pub = a_pub
-    recv → peer_pub = b_pub  ◄─────────  send(b_pub)
-    shared = ECDH(a_priv, b_pub)           shared = ECDH(b_priv, a_pub)
-    K0 = HKDF(shared, info=SESSION_INFO)   K0 = HKDF(shared, info=SESSION_INFO)
+    sig_a = sign(id_priv_a, a_pub)         sig_b = sign(id_priv_b, b_pub)
+    send(a_pub || sig_a) 96 B ──────────►  recv 96 B
+                                            verify(id_pub_a, a_pub, sig_a)  ← aborts if invalid
+    recv 96 B             ◄──────────────  send(b_pub || sig_b) 96 B
+    verify(id_pub_b, b_pub, sig_b)          shared = ECDH(b_priv, a_pub)
+    shared = ECDH(a_priv, b_pub)            K0 = HKDF(shared, SESSION_INFO)
+    K0 = HKDF(shared, SESSION_INFO)         [Both sides hold identical K0]
     [Both sides hold identical K0]
 
 Transport Framing (envelope receive)
@@ -54,6 +67,8 @@ encodes the ciphertext length.
 
 Error Handling Philosophy (TAD Section 7.1)
 --------------------------------------------
+* Signature verification failure → session rejected immediately with
+  "[!] Identity verification failed — possible MITM attempt".
 * Decryption / tag failures → message dropped, metadata logged, session
   continues.
 * Sequence mismatch → message dropped, session continues.
@@ -75,7 +90,7 @@ try:
 except Exception:
     pass
 
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidTag, InvalidSignature
 
 # ---------------------------------------------------------------------------
 # Project modules
@@ -83,7 +98,15 @@ from cryptography.exceptions import InvalidTag
 import crypto_core
 import dke_engine
 import protocol
-from crypto_core import SESSION_INFO, PUBLIC_KEY_SIZE
+from crypto_core import (
+    SESSION_INFO,
+    PUBLIC_KEY_SIZE,
+    IDENTITY_PUBLIC_KEY_SIZE,
+    SIGNATURE_SIZE,
+    generate_identity_keypair,
+    sign_public_key,
+    verify_public_key,
+)
 from dke_engine import (
     DKESessionState,
     SequenceError,
@@ -110,6 +133,7 @@ _VERSION = "1.0"
 _BANNER = (
     "DKE Messaging Engine v" + _VERSION + "\n"
     "End-to-end encrypted chat with Dynamic Key Evolution.\n"
+    "Ed25519 identity authentication enabled (MITM protection).\n"
     "Type 'help' for available commands."
 )
 
@@ -123,6 +147,12 @@ MSG_CONNECTING = "[*] Connecting to {host}:{port} ..."
 MSG_PEER_CONNECTED = "[*] Peer connected. Exchanging public keys ..."
 MSG_SESSION_ESTABLISHED = "[+] Secure session established. Type your message and press Enter."
 MSG_SESSION_ENDED = "[*] Session ended. Key material discarded."
+MSG_IDENTITY_KEY = "[*] Your identity key (share this with your peer out-of-band):\n    {hex}"
+MSG_PEER_KEY_WARN = (
+    "[!] No --peer-key supplied — identity verification DISABLED for this session.\n"
+    "    MITM protection is NOT active. Provide --peer-key <hex> to enable it."
+)
+MSG_PEER_KEY_OK = "[*] Peer identity key accepted. MITM protection ACTIVE."
 
 ERR_AUTH_FAILED = "[!] A message failed integrity verification and was discarded."
 ERR_OUT_OF_ORDER = "[!] Unexpected message order detected; message discarded. Session remains active."
@@ -132,6 +162,15 @@ ERR_NO_SESSION_SEND = "[!] No active session. Use 'start --listen' or 'start --c
 ERR_ALREADY_ACTIVE = "[!] A session is already active. Use 'end' first."
 ERR_NO_SESSION_END = "[!] No active session to end."
 ERR_NO_SESSION_STATUS = "[!] No active session."
+ERR_IDENTITY_VERIFY = "[!] Identity verification failed — possible MITM attempt"
+
+# ---------------------------------------------------------------------------
+# Identity key — generated once at process startup, never written to disk
+# ---------------------------------------------------------------------------
+# Each party generates a fresh Ed25519 identity keypair on every launch.
+# The public key is printed as a hex fingerprint so the peer can verify
+# it out-of-band (analogous to Signal's "safety numbers").
+_identity_private, _identity_public = generate_identity_keypair()
 
 # ---------------------------------------------------------------------------
 # Global session state  (protected by _lock)
@@ -241,23 +280,31 @@ def _send_envelope(sock: socket.socket, envelope: bytes) -> None:
 # ===========================================================================
 
 
-def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]:
-    """Listen for one incoming connection and perform the DKE handshake.
+def _handshake_listener(
+    port: int,
+    peer_identity_pub: bytes | None,
+) -> tuple[socket.socket, DKESessionState, str]:
+    """Listen for one incoming connection and perform the authenticated DKE handshake.
 
     Role: **Alice** (listener).
 
-    Handshake order:
+    Handshake order (Ed25519-authenticated):
       1. Bind and listen on ``port``.
       2. Accept the first incoming connection (one-shot server).
-      3. Generate X25519 keypair.
-      4. Send local public key (32 bytes) to peer.
-      5. Receive peer's public key (32 bytes).
-      6. ECDH → HKDF → K0 → DKESessionState.
+      3. Generate X25519 ephemeral keypair.
+      4. Sign local ECDH public key with Ed25519 identity private key.
+      5. Send ``ecdh_pub (32 B) || signature (64 B)`` = 96 bytes to peer.
+      6. Receive peer's 96-byte payload; split into peer_ecdh_pub + peer_sig.
+      7. Verify peer_sig against peer_identity_pub (if supplied); abort on failure.
+      8. ECDH → HKDF → K0 → DKESessionState.
 
     Parameters
     ----------
     port : int
         TCP port to listen on (0–65535).
+    peer_identity_pub : bytes or None
+        The peer's 32-byte Ed25519 identity public key (obtained out-of-band).
+        ``None`` disables signature verification for this session (demo mode).
 
     Returns
     -------
@@ -268,9 +315,11 @@ def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]
     ------
     OSError
         If the socket cannot be bound.
+    ConnectionError
+        If signature verification fails or ECDH key exchange fails.
 
     TAD Reference: Section 6.1 — Session Establishment
-               Section 4.3 — Public Key Exchange Format
+                   Section 4.3 — Public Key Exchange Format
     """
     try:
         server_sock = socket.create_server(("", port), family=socket.AF_INET6, dualstack_ipv6=True)
@@ -285,15 +334,35 @@ def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]
     print(MSG_PEER_CONNECTED, flush=True)
 
     try:
-        # ── Key exchange ───────────────────────────────────────────────────
+        # ── Generate ephemeral ECDH keypair and sign it ───────────────────
         priv, pub = crypto_core.generate_keypair()
-        conn.sendall(pub)                            # Alice sends first
-        peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)
+        sig = sign_public_key(_identity_private, pub)
 
-        # ── Key derivation ─────────────────────────────────────────────────
+        # Alice sends first: ecdh_pub (32 B) || signature (64 B)
+        conn.sendall(pub + sig)
+
+        # ── Receive Bob's authenticated ECDH public key (96 bytes) ────────
+        peer_payload = _recv_exactly(conn, PUBLIC_KEY_SIZE + SIGNATURE_SIZE)
+        peer_pub = peer_payload[:PUBLIC_KEY_SIZE]
+        peer_sig = peer_payload[PUBLIC_KEY_SIZE:]
+
+        # ── Verify peer's signature before proceeding ──────────────────
+        if peer_identity_pub is not None:
+            try:
+                verify_public_key(peer_identity_pub, peer_pub, peer_sig)
+            except (InvalidSignature, ValueError):
+                conn.close()
+                raise ConnectionError(ERR_IDENTITY_VERIFY)
+            print(MSG_PEER_KEY_OK, flush=True)
+        else:
+            print(MSG_PEER_KEY_WARN, flush=True)
+
+        # ── Key derivation ───────────────────────────────────────────
         shared = crypto_core.derive_shared_secret(priv, peer_pub)
         k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
         state = DKESessionState.from_k0(k0)
+    except ConnectionError:
+        raise
     except Exception as exc:
         conn.close()
         raise ConnectionError(f"Key exchange failed with peer {peer_str}: {exc}") from exc
@@ -301,17 +370,23 @@ def _handshake_listener(port: int) -> tuple[socket.socket, DKESessionState, str]
     return conn, state, peer_str
 
 
-def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessionState, str]:
-    """Connect to a listening peer and perform the DKE handshake.
+def _handshake_connector(
+    host: str,
+    port: int,
+    peer_identity_pub: bytes | None,
+) -> tuple[socket.socket, DKESessionState, str]:
+    """Connect to a listening peer and perform the authenticated DKE handshake.
 
     Role: **Bob** (connector).
 
-    Handshake order:
+    Handshake order (Ed25519-authenticated):
       1. Connect to ``host:port``.
-      2. Generate X25519 keypair.
-      3. Receive peer's public key (32 bytes).   ← Alice sends first
-      4. Send local public key (32 bytes) to peer.
-      5. ECDH → HKDF → K0 → DKESessionState.
+      2. Generate X25519 ephemeral keypair.
+      3. Receive Alice's 96-byte payload; split into peer_ecdh_pub + peer_sig. ← Alice sends first
+      4. Verify peer_sig against peer_identity_pub (if supplied); abort on failure.
+      5. Sign local ECDH public key with Ed25519 identity private key.
+      6. Send ``ecdh_pub (32 B) || signature (64 B)`` = 96 bytes to peer.
+      7. ECDH → HKDF → K0 → DKESessionState.
 
     Parameters
     ----------
@@ -319,6 +394,9 @@ def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessio
         Hostname or IP address to connect to.
     port : int
         TCP port to connect to.
+    peer_identity_pub : bytes or None
+        The peer's 32-byte Ed25519 identity public key (obtained out-of-band).
+        ``None`` disables signature verification for this session (demo mode).
 
     Returns
     -------
@@ -329,9 +407,11 @@ def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessio
     ------
     OSError
         If the connection is refused.
+    ConnectionError
+        If signature verification fails or ECDH key exchange fails.
 
     TAD Reference: Section 6.1 — Session Establishment
-               Section 4.3 — Public Key Exchange Format
+                   Section 4.3 — Public Key Exchange Format
     """
     target_host = "127.0.0.1" if host.lower() in ("localhost", "127.0.0.1") else host
     peer_str = f"{host}:{port}"
@@ -341,15 +421,35 @@ def _handshake_connector(host: str, port: int) -> tuple[socket.socket, DKESessio
     print(MSG_PEER_CONNECTED, flush=True)
 
     try:
-        # ── Key exchange ───────────────────────────────────────────────────
+        # ── Generate ephemeral ECDH keypair ───────────────────────────
         priv, pub = crypto_core.generate_keypair()
-        peer_pub = _recv_exactly(conn, PUBLIC_KEY_SIZE)  # Bob reads first
-        conn.sendall(pub)
 
-        # ── Key derivation ─────────────────────────────────────────────────
+        # ── Receive Alice's authenticated ECDH public key (96 bytes) ──────
+        peer_payload = _recv_exactly(conn, PUBLIC_KEY_SIZE + SIGNATURE_SIZE)  # Bob reads first
+        peer_pub = peer_payload[:PUBLIC_KEY_SIZE]
+        peer_sig = peer_payload[PUBLIC_KEY_SIZE:]
+
+        # ── Verify peer's signature before proceeding ──────────────────
+        if peer_identity_pub is not None:
+            try:
+                verify_public_key(peer_identity_pub, peer_pub, peer_sig)
+            except (InvalidSignature, ValueError):
+                conn.close()
+                raise ConnectionError(ERR_IDENTITY_VERIFY)
+            print(MSG_PEER_KEY_OK, flush=True)
+        else:
+            print(MSG_PEER_KEY_WARN, flush=True)
+
+        # ── Sign our ECDH public key and send 96 bytes ─────────────────
+        sig = sign_public_key(_identity_private, pub)
+        conn.sendall(pub + sig)
+
+        # ── Key derivation ───────────────────────────────────────────
         shared = crypto_core.derive_shared_secret(priv, peer_pub)
         k0 = crypto_core.hkdf_derive(shared, info=SESSION_INFO)
         state = DKESessionState.from_k0(k0)
+    except ConnectionError:
+        raise
     except Exception as exc:
         conn.close()
         raise ConnectionError(f"Key exchange failed with peer {peer_str}: {exc}") from exc
@@ -460,11 +560,15 @@ def _receive_loop() -> None:
 def _cmd_start(args: list[str]) -> None:
     """Handle ``start --listen <port>`` and ``start --connect <host:port>``.
 
-    Establishes a TCP connection, performs the DKE handshake, seeds the
-    session state, and starts the background receive thread.
+    Establishes a TCP connection, performs the authenticated DKE handshake,
+    seeds the session state, and starts the background receive thread.
+
+    Optional ``--peer-key <hex>`` argument supplies the peer's Ed25519 identity
+    public key (printed by the peer at startup) to enable MITM protection.
+    If omitted, signature verification is skipped with a warning.
 
     TAD Reference: Section 3.4 — Startup Sequence
-               Section 6.1 — Session Establishment
+                   Section 6.1 — Session Establishment
     """
     global _session_state, _session_sock, _session_role, _session_peer
     global _recv_thread
@@ -474,25 +578,47 @@ def _cmd_start(args: list[str]) -> None:
         return
 
     if len(args) < 2:
-        print("[!] Usage: start --listen <port>  |  start --connect <host:port>")
+        print("[!] Usage: start --listen <port>  |  start --connect <host:port>  [--peer-key <hex>]")
         return
 
-    mode = args[0].lower()
+    # ── Parse optional --peer-key <hex> ────────────────────────────────
+    peer_identity_pub: bytes | None = None
+    filtered_args = list(args)
+    if "--peer-key" in filtered_args:
+        idx = filtered_args.index("--peer-key")
+        if idx + 1 >= len(filtered_args):
+            print("[!] --peer-key requires a hex argument")
+            return
+        peer_key_hex = filtered_args[idx + 1]
+        filtered_args = filtered_args[:idx] + filtered_args[idx + 2:]
+        try:
+            peer_identity_pub = bytes.fromhex(peer_key_hex)
+        except ValueError:
+            print(f"[!] Invalid --peer-key hex: {peer_key_hex!r}")
+            return
+        if len(peer_identity_pub) != IDENTITY_PUBLIC_KEY_SIZE:
+            print(
+                f"[!] --peer-key must be {IDENTITY_PUBLIC_KEY_SIZE * 2} hex chars "
+                f"({IDENTITY_PUBLIC_KEY_SIZE} bytes), got {len(peer_identity_pub)} bytes."
+            )
+            return
+
+    mode = filtered_args[0].lower() if filtered_args else ""
 
     try:
         # ── Listener (Alice) ────────────────────────────────────────────
         if mode == "--listen":
             try:
-                port = int(args[1])
-            except ValueError:
-                print(f"[!] Invalid port: {args[1]!r}")
+                port = int(filtered_args[1])
+            except (ValueError, IndexError):
+                print(f"[!] Invalid port: {filtered_args[1:]!r}")
                 return
-            conn, state, peer_str = _handshake_listener(port)
+            conn, state, peer_str = _handshake_listener(port, peer_identity_pub)
             role = "alice"
 
         # ── Connector (Bob) ─────────────────────────────────────────────
         elif mode == "--connect":
-            raw_addr = args[1]
+            raw_addr = filtered_args[1] if len(filtered_args) > 1 else ""
             if ":" not in raw_addr:
                 print(f"[!] Expected <host:port>, got: {raw_addr!r}")
                 return
@@ -502,7 +628,7 @@ def _cmd_start(args: list[str]) -> None:
             except ValueError:
                 print(f"[!] Invalid port: {port_str!r}")
                 return
-            conn, state, peer_str = _handshake_connector(host, port)
+            conn, state, peer_str = _handshake_connector(host, port, peer_identity_pub)
             role = "bob"
 
         else:
@@ -645,13 +771,19 @@ def _cmd_help() -> None:
     print(textwrap.dedent("""
       Commands
       --------
-      start --listen <port>        Starts as session initiator, waiting for peer to connect
-      start --connect <host:port>  Starts as joining party, connecting to waiting peer
+      start --listen <port> [--peer-key <hex>]        Starts as session initiator, waiting for peer
+      start --connect <host:port> [--peer-key <hex>]  Starts as joining party, connecting to peer
       send <message>               Encrypts and sends a message in an active session
       status                       Shows current session state and message counters (no key material)
       end                          Ends the session and discards all key material
       help                         Lists available commands
       quit                         Exit the program
+
+      MITM Protection
+      ---------------
+      Pass --peer-key <hex> with the peer's identity key (printed at their startup)
+      to enable Ed25519 signature verification.  Without --peer-key, verification
+      is skipped and a warning is displayed.
 
       Message display
       ---------------
@@ -671,16 +803,18 @@ def _cmd_help() -> None:
 def main() -> None:
     """Interactive REPL entry point.
 
-    Prints the banner then loops reading user input.  If command-line
-    arguments are provided (e.g. 'start --listen 5050' or
-    'start --connect localhost:5050'), executes the command initially
-    before continuing into the interactive REPL.
+    Prints the banner, displays the local Ed25519 identity key fingerprint,
+    then loops reading user input.  If command-line arguments are provided
+    (e.g. 'start --listen 5050' or 'start --connect localhost:5050'),
+    executes the command initially before continuing into the interactive REPL.
 
     TAD Reference: Section 3.4 — main_chat.py overview
     """
     print(_BANNER)
-    print("")
-
+    print()
+    # Print identity fingerprint so the peer can verify it out-of-band
+    print(MSG_IDENTITY_KEY.format(hex=_identity_public.hex()), flush=True)
+    print()
     # Parse initial command-line arguments if provided
     # e.g.: python main_chat.py start --listen 5050
     #       python main_chat.py start --connect localhost:5050
